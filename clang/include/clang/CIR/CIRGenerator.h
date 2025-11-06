@@ -32,6 +32,7 @@ class CIRGenModule;
 
 namespace mlir {
 class MLIRContext;
+class ModuleOp;
 } // namespace mlir
 namespace cir {
 class CIRGenerator : public clang::ASTConsumer {
@@ -63,7 +64,8 @@ class CIRGenerator : public clang::ASTConsumer {
   };
 
 protected:
-  std::unique_ptr<mlir::MLIRContext> mlirContext;
+  std::unique_ptr<mlir::MLIRContext> ownedMlirContext;
+  mlir::MLIRContext *mlirContext;
   std::unique_ptr<clang::CIRGen::CIRGenModule> cgm;
 
 private:
@@ -72,8 +74,11 @@ private:
 public:
   CIRGenerator(clang::DiagnosticsEngine &diags,
                llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> fs,
-               const clang::CodeGenOptions &cgo);
+               const clang::CodeGenOptions &cgo,
+               mlir::MLIRContext *mlirContext = nullptr);
   ~CIRGenerator() override;
+
+  static void LoadCIRDialects(mlir::MLIRContext &mlirContext);
   void Initialize(clang::ASTContext &astContext) override;
   bool HandleTopLevelDecl(clang::DeclGroupRef group) override;
   void HandleTranslationUnit(clang::ASTContext &astContext) override;
@@ -85,8 +90,8 @@ public:
   void HandleVTable(clang::CXXRecordDecl *rd) override;
 
   mlir::ModuleOp getModule() const;
-  mlir::MLIRContext &getMLIRContext() { return *mlirContext; };
-  const mlir::MLIRContext &getMLIRContext() const { return *mlirContext; };
+  mlir::MLIRContext &getMLIRContext() { return *mlirContext; }
+  const mlir::MLIRContext &getMLIRContext() const { return *mlirContext; }
 
   bool verifyModule() const;
 

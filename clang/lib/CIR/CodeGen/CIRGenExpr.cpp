@@ -2506,6 +2506,7 @@ CIRGenFunction::emitConditionalBlocks(const AbstractConditionalOperator *e,
       // to patch arms as to properly match yield types.
       // If the current block's terminator is an UnreachableOp (from a throw),
       // we don't need a yield
+      cir::YieldOp::create(b, loc);
       if (builder.getInsertionBlock()->mightHaveTerminator()) {
         mlir::Operation *terminator =
             builder.getInsertionBlock()->getTerminator();

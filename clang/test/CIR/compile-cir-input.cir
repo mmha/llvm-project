@@ -1,0 +1,32 @@
+// Test that .cir files can be compiled directly as input
+
+// RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -emit-llvm %s -o - | FileCheck %s --check-prefix=LLVM
+// RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -S %s -o - | FileCheck %s --check-prefix=ASM
+// RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -emit-obj %s -o %t.o
+// RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -x cir %s -emit-llvm -o - | FileCheck %s --check-prefix=LLVM
+
+// REQUIRES: x86-registered-target
+
+!s32i = !cir.int<s, 32>
+
+module attributes {cir.lang = #cir.lang<cxx>, cir.triple = "x86_64-unknown-linux-gnu"} {
+  cir.func @test_function() -> !s32i {
+    %0 = cir.alloca !s32i, !cir.ptr<!s32i>, ["__retval"] {alignment = 4 : i64}
+    %1 = cir.const #cir.int<42> : !s32i
+    cir.store %1, %0 : !s32i, !cir.ptr<!s32i>
+    %2 = cir.load %0 : !cir.ptr<!s32i>, !s32i
+    cir.return %2 : !s32i
+  }
+}
+
+// LLVM: define i32 @test_function()
+// LLVM:   %{{.*}} = alloca i32
+// LLVM:   store i32 42
+// LLVM:   %{{.*}} = load i32
+// LLVM:   ret i32 %{{.*}}
+
+// ASM: test_function:
+// ASM:   movl $42, -{{[0-9]+}}(%rsp)
+// ASM:   movl -{{[0-9]+}}(%rsp), %eax
+// ASM:   retq
+

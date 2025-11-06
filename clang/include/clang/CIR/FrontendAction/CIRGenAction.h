@@ -46,6 +46,10 @@ protected:
   CreateASTConsumer(clang::CompilerInstance &CI,
                     llvm::StringRef InFile) override;
 
+  mlir::OwningOpRef<mlir::ModuleOp> loadModule(llvm::MemoryBufferRef MBRef);
+
+  void ExecuteAction() override;
+
 public:
   ~CIRGenAction() override;
 

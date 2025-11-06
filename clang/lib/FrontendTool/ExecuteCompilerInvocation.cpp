@@ -50,11 +50,19 @@ CreateFrontendBaseAction(CompilerInstance &CI) {
   (void)Action;
 
   unsigned UseCIR = CI.getFrontendOpts().UseClangIRPipeline;
-  frontend::ActionKind Act = CI.getFrontendOpts().ProgramAction;
-  bool EmitsCIR = Act == EmitCIR;
 
-  if (!UseCIR && EmitsCIR)
-    llvm::report_fatal_error("-emit-cir and only valid when using -fclangir");
+#if CLANG_ENABLE_CIR
+  if (!UseCIR) {
+    FrontendInputFile *it =
+        llvm::find_if(CI.getFrontendOpts().Inputs, [](const auto &I) {
+          return I.getKind().getLanguage() == Language::CIR;
+        });
+    if (it != CI.getFrontendOpts().Inputs.end()) {
+      CI.getDiagnostics().Report(diag::err_fe_cir_disabled) << it->getFile();
+      return nullptr;
+    }
+  }
+#endif
 
   switch (CI.getFrontendOpts().ProgramAction) {
   case ASTDeclList:            return std::make_unique<ASTDeclListAction>();

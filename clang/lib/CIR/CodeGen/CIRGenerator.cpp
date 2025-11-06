@@ -27,14 +27,28 @@ using namespace clang;
 
 void CIRGenerator::anchor() {}
 
+void CIRGenerator::LoadCIRDialects(mlir::MLIRContext &mlirContext) {
+  mlirContext.loadDialect<mlir::DLTIDialect>();
+  mlirContext.loadDialect<cir::CIRDialect>();
+  mlirContext.getOrLoadDialect<mlir::acc::OpenACCDialect>();
+}
+
 CIRGenerator::CIRGenerator(clang::DiagnosticsEngine &diags,
                            llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> vfs,
-                           const CodeGenOptions &cgo)
+                           const CodeGenOptions &cgo,
+                           mlir::MLIRContext *mlirContext)
     : diags(diags), fs(std::move(vfs)), codeGenOpts{cgo},
-      handlingTopLevelDecls{0} {}
+      handlingTopLevelDecls{0}, mlirContext(mlirContext) {}
 CIRGenerator::~CIRGenerator() {
   // There should normally not be any leftover inline method definitions.
   assert(deferredInlineMemberFuncDefs.empty() || diags.hasErrorOccurred());
+
+  // Only create and initialize context if one wasn't provided externally
+  if (!mlirContext) {
+    ownedMlirContext = std::make_unique<mlir::MLIRContext>();
+    mlirContext = ownedMlirContext.get();
+    LoadCIRDialects(*mlirContext);
+  }
 }
 
 static void setMLIRDataLayout(mlir::ModuleOp &mod, const llvm::DataLayout &dl) {
@@ -49,18 +63,13 @@ void CIRGenerator::Initialize(ASTContext &astContext) {
 
   this->astContext = &astContext;
 
-  mlirContext = std::make_unique<mlir::MLIRContext>();
-  mlirContext->loadDialect<mlir::DLTIDialect>();
-  mlirContext->loadDialect<cir::CIRDialect>();
-  mlirContext->getOrLoadDialect<mlir::acc::OpenACCDialect>();
-
   // Register extensions to integrate CIR types with OpenACC.
   mlir::DialectRegistry registry;
   cir::acc::registerOpenACCExtensions(registry);
   mlirContext->appendDialectRegistry(registry);
 
-  cgm = std::make_unique<clang::CIRGen::CIRGenModule>(
-      *mlirContext.get(), astContext, codeGenOpts, diags);
+  cgm = std::make_unique<clang::CIRGen::CIRGenModule>(*mlirContext, astContext,
+                                                      codeGenOpts, diags);
   mlir::ModuleOp mod = cgm->getModule();
   llvm::DataLayout layout =
       llvm::DataLayout(astContext.getTargetInfo().getDataLayoutString());
