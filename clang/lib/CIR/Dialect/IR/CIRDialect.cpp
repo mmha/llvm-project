@@ -703,10 +703,21 @@ void cir::ConditionOp::getSuccessorRegions(
     return;
   }
 
-  // Parent is an await: condition may branch to resume or suspend regions.
+  // Parent is an await: condition in ready region branches to resume or
+  // suspend regions. Condition in suspend region branches to resume (veto) or
+  // exits to parent op (suspend).
   auto await = cast<AwaitOp>(getOperation()->getParentOp());
-  regions.emplace_back(&await.getResume());
-  regions.emplace_back(&await.getSuspend());
+  mlir::Region *parentRegion = getOperation()->getBlock()->getParent();
+  if (parentRegion == &await.getReady()) {
+    regions.emplace_back(&await.getResume());
+    regions.emplace_back(&await.getSuspend());
+    return;
+  }
+  if (parentRegion == &await.getSuspend()) {
+    regions.emplace_back(getOperation());
+    regions.emplace_back(&await.getResume());
+    return;
+  }
 }
 
 MutableOperandRange
@@ -3611,15 +3622,17 @@ void cir::AwaitOp::getSuccessorRegions(
     return;
   }
 
-  // Branching from suspend: the cir.coro.suspend_point terminating it
-  // continues in resume once the coroutine is resumed. A coroutine that stays
-  // suspended or is destroyed instead transfers directly to the enclosing
-  // cir.coroutine's exit or destroy region and skips everything after this
-  // cir.await. RegionBranchOpInterface cannot express such a non-local
-  // transfer: those regions are only reachable at region granularity, through
-  // the cir.coroutine's edges out of the region that holds this op. The parent
-  // successor only records that the cir.await can be left without running
-  // resume. The model is for reachability only; it is not path-accurate.
+  // Branching from suspend: whether it ends in a cir.coro.suspend_point or,
+  // for a bool-returning await_suspend, in a cir.condition, control continues
+  // in resume when the coroutine is resumed or the suspension is vetoed. A
+  // coroutine that stays suspended or is destroyed instead transfers directly
+  // to the enclosing cir.coroutine's exit or destroy region and skips
+  // everything after this cir.await. RegionBranchOpInterface cannot express
+  // such a non-local transfer: those regions are only reachable at region
+  // granularity, through the cir.coroutine's edges out of the region that
+  // holds this op. The parent successor only records that the cir.await can be
+  // left without running resume. The model is for reachability only; it is not
+  // path-accurate.
   if (&getSuspend() == parentRegion) {
     regions.emplace_back(&getResume());
     regions.emplace_back(getOperation());
@@ -3631,12 +3644,14 @@ void cir::AwaitOp::getSuccessorRegions(
 }
 
 LogicalResult cir::AwaitOp::verify() {
-  if (!isa<ConditionOp>(this->getReady().back().getTerminator()))
+  if (this->getReady().empty() ||
+      !isa<ConditionOp>(this->getReady().back().getTerminator()))
     return emitOpError("ready region must end with cir.condition");
-  if (this->getSuspend().empty())
-    return emitOpError("suspend region must not be empty");
-  if (!isa<CoroSuspendPoint>(this->getSuspend().back().getTerminator()))
-    return emitOpError("suspend region must end with cir.coro.suspend_point");
+  if (this->getSuspend().empty() ||
+      !isa<CoroSuspendPoint, ConditionOp>(
+          this->getSuspend().back().getTerminator()))
+    return emitOpError(
+        "suspend region must end with cir.coro.suspend_point or cir.condition");
   return success();
 }
 
