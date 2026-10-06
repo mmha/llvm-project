@@ -61,6 +61,8 @@ Task falls_off_end() {
 // CIR-NEXT:        }
 // CIR-NEXT:        cir.call @_ZN4Task12promise_type11return_voidEv(%[[PROMISE]])
 // CIR-NEXT:        cir.co_return
+// CIR-EH-NEXT:   ^bb1:
+// CIR-EH-NEXT:     cir.yield
 // CIR-EH-NEXT:   } catch all
 // CIR:         }, finalSuspend : {
 
@@ -100,6 +102,8 @@ Task falls_off_end_with_extended_temporary() {
 // CIR-NEXT:        }
 // CIR-NEXT:        cir.call @_ZN4Task12promise_type11return_voidEv(%[[PROMISE]])
 // CIR-NEXT:        cir.co_return
+// CIR-EH-NEXT:   ^bb1:
+// CIR-EH-NEXT:     cir.yield
 // CIR-EH-NEXT:   } catch all
 // CIR:         }, finalSuspend : {
 
@@ -169,6 +173,8 @@ Task co_return_in_if(bool b) {
 // CIR-NEXT:        }
 // CIR-NEXT:        cir.call @_ZN4Task12promise_type11return_voidEv(%[[PROMISE]])
 // CIR-NEXT:        cir.co_return
+// CIR-EH-NEXT:   ^bb1:
+// CIR-EH-NEXT:     cir.yield
 // CIR-EH-NEXT:   } catch all
 // CIR:         }, finalSuspend : {
 
@@ -205,6 +211,8 @@ Task co_return_at_end() {
 // CIR:             cir.cleanup.scope {
 // CIR-NEXT:          cir.call @_ZN4Task12promise_type11return_voidEv(%[[PROMISE]])
 // CIR-NEXT:          cir.co_return
+// CIR-NEXT:        ^bb1:
+// CIR-NEXT:          cir.yield
 // CIR-NOEH-NEXT:   } cleanup normal {
 // CIR-EH-NEXT:     } cleanup all {
 // CIR-NEXT:          cir.call @_ZN1SD1Ev(%[[S]])
