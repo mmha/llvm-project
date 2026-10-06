@@ -318,6 +318,38 @@ coroutineBodyExceptionHelper(CIRGenFunction &cgf, const CoroutineBodyStmt &s) {
   return res;
 }
 
+// Make the coro.id refer to the promise once it has been emitted. LLVM's
+// coroutine passes give the promise named here a fixed offset in the frame,
+// which is what __builtin_coro_promise, and so coroutine_handle::promise() and
+// coroutine_handle::from_promise(), rely on.
+static void setCoroIdPromise(CIRGenFunction &cgf, cir::CoroIdOp coroId,
+                             Address promiseAddr) {
+  // The coro.id is created before the promise, but the promise's alloca (or,
+  // for a non-default alloca address space, its address space cast) has been
+  // emitted into the entry block of the current lexical scope, which is the
+  // function's: neither the cir.coroutine regions nor the exception
+  // specification's cir.try open a scope of their own. It therefore precedes
+  // the coro.id, or the op in that block containing it: in a noexcept
+  // coroutine compiled with exceptions, the coro.id is in the cir.try that
+  // calls std::terminate when an exception escapes the function. Opening a
+  // LexicalScope for the initial_suspend region would break this.
+  mlir::Value promisePtr = promiseAddr.getPointer();
+  assert([&] {
+    mlir::Operation *promiseDef = promisePtr.getDefiningOp();
+    if (!promiseDef)
+      return false;
+    mlir::Operation *ancestor =
+        promiseDef->getBlock()->findAncestorOpInBlock(*coroId);
+    return ancestor && promiseDef->isBeforeInBlock(ancestor);
+  }() && "promise address must dominate coro.id");
+
+  CIRGenBuilderTy &builder = cgf.getBuilder();
+  mlir::OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPoint(coroId);
+  coroId.getPromiseMutable().assign(
+      builder.createBitcast(coroId.getLoc(), promisePtr, cgf.voidPtrTy));
+}
+
 mlir::LogicalResult
 CIRGenFunction::emitCoroutineBody(const CoroutineBodyStmt &s) {
   mlir::Location openCurlyLoc = getLoc(s.getBeginLoc());
@@ -421,6 +453,7 @@ CIRGenFunction::emitCoroutineBody(const CoroutineBodyStmt &s) {
     // Builds `initial_suspend`.
     auto initialSuspendBuilder = [&]() -> mlir::LogicalResult {
       emitAutoVarDeclWithCapturedCleanups(*s.getPromiseDecl(), frameCleanups);
+      setCoroIdPromise(*this, coroId, getAddrOfLocalVar(s.getPromiseDecl()));
       // returnValue should be valid as long as the coroutine's return type
       // is not void. The assertion could help us to reduce the check later.
       assert(returnValue.isValid() == (bool)s.getReturnStmt());
