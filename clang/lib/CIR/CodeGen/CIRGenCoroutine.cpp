@@ -724,12 +724,19 @@ static bool isResumeExprInTryCatch(const CGCoroData &coro, cir::AwaitKind kind,
          stmtCanThrow(s.getResumeExpr());
 }
 
+// Emits the cir.await of a suspend expression. \p tmpResumeSlotAddr is set to
+// a temporary allocated in \p scopeParentBlock that holds the await_resume()
+// result, so that it can be reloaded after the cir.await: the scalar or complex
+// value, or, if \p forLValue is set, the address of the object the returned
+// reference refers to. It is left null if the result is ignored, is an
+// aggregate (emitted into \p aggSlot), or is discarded by the initial suspend
+// point's try/catch.
 static LValueOrRValue
 emitSuspendExpression(CIRGenFunction &cgf, CGCoroData &coro,
                       CoroutineSuspendExpr const &s, cir::AwaitKind kind,
                       AggValueSlot aggSlot, bool ignoreResult,
                       mlir::Block *scopeParentBlock,
-                      mlir::Value &tmpResumeRValAddr, bool forLValue) {
+                      mlir::Value &tmpResumeSlotAddr, bool forLValue) {
   [[maybe_unused]] mlir::LogicalResult awaitBuild = mlir::success();
   LValueOrRValue awaitRes;
 
@@ -823,9 +830,19 @@ emitSuspendExpression(CIRGenFunction &cgf, CGCoroData &coro,
           // await_resume().
           awaitRes.rv = RValue::getIgnored();
         } else if (forLValue) {
-          // FIXME(cir): the alloca for the resume expr should be placed in the
-          // enclosing cir.scope instead.
           awaitRes.lv = cgf.emitLValue(s.getResumeExpr());
+          assert(awaitRes.lv.isSimple() &&
+                 "await_resume() should return a reference");
+          // As for a scalar result, store the address of the result so that
+          // it can be reloaded after the cir.await.
+          mlir::Value addr = awaitRes.lv.getPointer();
+          Address slot(cgf.emitAlloca(
+                           "__coawait_resume_lval", addr.getType(), loc,
+                           cgf.getPointerAlign(),
+                           builder.getBestAllocaInsertPoint(scopeParentBlock)),
+                       addr.getType(), cgf.getPointerAlign());
+          builder.createStore(loc, addr, slot);
+          tmpResumeSlotAddr = slot.getPointer();
         } else {
           awaitRes.rv =
               cgf.emitAnyExpr(s.getResumeExpr(), aggSlot, ignoreResult);
@@ -834,13 +851,13 @@ emitSuspendExpression(CIRGenFunction &cgf, CGCoroData &coro,
             if (rv.isScalar() || rv.isComplex()) {
               mlir::Value value =
                   rv.isScalar() ? rv.getValue() : rv.getComplexValue();
-              tmpResumeRValAddr = cgf.emitAlloca(
+              tmpResumeSlotAddr = cgf.emitAlloca(
                   "__coawait_resume_rval", value.getType(), loc,
                   CharUnits::One(),
                   builder.getBestAllocaInsertPoint(scopeParentBlock));
               // Store the rvalue so we can reload it before the promise call.
               builder.CIRBaseBuilderTy::createStore(loc, value,
-                                                    tmpResumeRValAddr);
+                                                    tmpResumeSlotAddr);
             } else {
               assert(rv.isAggregate() && "unexpected rvalue kind");
             }
@@ -933,6 +950,58 @@ RValue CIRGenFunction::emitCoyieldExpr(const CoyieldExpr &e,
                                        bool ignoreResult) {
   return emitSuspendExpr(*this, e, cir::AwaitKind::Yield, aggSlot,
                          ignoreResult);
+}
+
+// Emits a suspend expression that is a glvalue: await_resume() returns a
+// reference.
+static LValue emitSuspendLValue(CIRGenFunction &cgf,
+                                const CoroutineSuspendExpr &e,
+                                cir::AwaitKind kind) {
+  assert(e.getResumeExpr()->isGLValue() &&
+         "a glvalue suspend expression needs await_resume() to return a "
+         "reference");
+
+  // The resume region of the cir.await stores the address of the result in a
+  // temporary in the enclosing scope, which is reloaded once the cir.await is
+  // complete.
+  mlir::Value tmpResumeLValAddr;
+  LValueOrRValue res = emitSuspendExpression(
+      cgf, *cgf.curCoro.data, e, kind, AggValueSlot::ignored(),
+      /*ignoreResult=*/false, cgf.curLexScope->getEntryBlock(),
+      tmpResumeLValAddr, /*forLValue=*/true);
+
+  CIRGenBuilderTy &builder = cgf.getBuilder();
+  mlir::Location loc = cgf.getLoc(e.getSourceRange());
+  if (!tmpResumeLValAddr) {
+    // The initial await_resume() call in a try/catch discards its result, and
+    // the initial suspend expression is a discarded-value expression, so there
+    // is no address to return. Return an lvalue on a null placeholder address,
+    // which is never dereferenced. An empty LValue, as in classic CodeGen,
+    // does not work here: emitLValue(ExprWithCleanups) spills the address, and
+    // Address requires a non-null pointer value.
+    assert(isResumeExprInTryCatch(*cgf.curCoro.data, kind, e) &&
+           "expected the address of the await_resume() result");
+    mlir::Type elemTy = cgf.convertTypeForMem(e.getType());
+    mlir::Value placeholderPtr =
+        builder.getNullPtr(builder.getPointerTo(elemTy), loc);
+    return cgf.makeAddrLValue(Address(placeholderPtr, elemTy, CharUnits::One()),
+                              e.getType());
+  }
+
+  Address resultAddr = res.lv.getAddress();
+  mlir::Value resultPtr =
+      builder.createAlignedLoad(loc, resultAddr.getPointer().getType(),
+                                tmpResumeLValAddr, cgf.getPointerAlign());
+  return cgf.makeAddrLValue(resultAddr.withPointer(resultPtr), res.lv.getType(),
+                            res.lv.getBaseInfo());
+}
+
+LValue CIRGenFunction::emitCoawaitLValue(const CoawaitExpr *e) {
+  return emitSuspendLValue(*this, *e, curCoro.data->currentAwaitKind);
+}
+
+LValue CIRGenFunction::emitCoyieldLValue(const CoyieldExpr *e) {
+  return emitSuspendLValue(*this, *e, cir::AwaitKind::Yield);
 }
 
 mlir::LogicalResult CIRGenFunction::emitCoreturnStmt(CoreturnStmt const &s) {

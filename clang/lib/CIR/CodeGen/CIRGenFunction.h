@@ -2274,6 +2274,10 @@ public:
   RValue emitCoyieldExpr(const CoyieldExpr &e,
                          AggValueSlot aggSlot = AggValueSlot::ignored(),
                          bool ignoreResult = false);
+
+  LValue emitCoawaitLValue(const CoawaitExpr *e);
+  LValue emitCoyieldLValue(const CoyieldExpr *e);
+
   /// Emit the computation of the specified expression of complex type,
   /// returning the result.
   mlir::Value emitComplexExpr(const Expr *e);
