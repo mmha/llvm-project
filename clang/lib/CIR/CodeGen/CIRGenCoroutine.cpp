@@ -648,14 +648,36 @@ CIRGenFunction::emitCoroutineBody(const CoroutineBodyStmt &s) {
   return res;
 }
 
-static bool memberCallExpressionCanThrow(const Expr *e) {
-  if (const auto *ce = dyn_cast<CXXMemberCallExpr>(e))
-    if (const auto *proto =
-            ce->getMethodDecl()->getType()->getAs<FunctionProtoType>())
-      if (isNoexceptExceptionSpec(proto->getExceptionSpecType()) &&
-          proto->canThrow() == CT_Cannot)
-        return false;
-  return true;
+// Whether a call to a function may throw, like FunctionCanThrow in classic
+// CodeGen.
+static bool functionCanThrow(const FunctionDecl *d) {
+  const auto *proto = d->getType()->getAs<FunctionProtoType>();
+  // Without a prototype, conservatively assume that the function throws.
+  if (!proto)
+    return true;
+  return !isNoexceptExceptionSpec(proto->getExceptionSpecType()) ||
+         proto->canThrow() != CT_Cannot;
+}
+
+// Whether the evaluation of a statement may throw, like StmtCanThrow in classic
+// CodeGen: whether it calls a function that may throw, or binds a temporary
+// whose destructor may throw.
+static bool stmtCanThrow(const Stmt *s) {
+  if (const auto *ce = dyn_cast<CallExpr>(s)) {
+    const FunctionDecl *callee = ce->getDirectCallee();
+    // Without a direct callee, conservatively assume that the call throws.
+    if (!callee || functionCanThrow(callee))
+      return true;
+  }
+
+  // The destructor call of a bound temporary is not among the children.
+  if (const auto *te = dyn_cast<CXXBindTemporaryExpr>(s))
+    if (functionCanThrow(te->getTemporary()->getDestructor()))
+      return true;
+
+  return llvm::any_of(s->children(), [](const Stmt *child) {
+    return child && stmtCanThrow(child);
+  });
 }
 
 // Given a suspend expression which roughly looks like:
@@ -680,6 +702,16 @@ struct LValueOrRValue {
   RValue rv;
 };
 } // namespace
+
+// Whether the await_resume() call of a suspend expression is wrapped in a
+// try/catch that passes its exceptions to unhandled_exception(). This is only
+// done for the initial suspend point, whose result is discarded, and only if
+// the call or the destruction of its result may throw.
+static bool isResumeExprInTryCatch(const CGCoroData &coro, cir::AwaitKind kind,
+                                   const CoroutineSuspendExpr &s) {
+  return coro.exceptionHandler && kind == cir::AwaitKind::Init &&
+         stmtCanThrow(s.getResumeExpr());
+}
 
 static LValueOrRValue
 emitSuspendExpression(CIRGenFunction &cgf, CGCoroData &coro,
@@ -719,11 +751,10 @@ emitSuspendExpression(CIRGenFunction &cgf, CGCoroData &coro,
       },
       /*resumeBuilder=*/
       [&](mlir::OpBuilder &b, mlir::Location loc) {
-        // Exception handling requires additional IR. If the 'await_resume'
-        // function is marked as 'noexcept', we avoid generating this additional
-        // IR.
-        if (coro.exceptionHandler && kind == cir::AwaitKind::Init &&
-            memberCallExpressionCanThrow(s.getResumeExpr())) {
+        // Exception handling requires additional IR. If neither the
+        // 'await_resume' call nor the destruction of its result can throw, we
+        // avoid generating this additional IR.
+        if (isResumeExprInTryCatch(coro, kind, s)) {
           // we are basically just emitting:
           // resumeEh = false;
           // try {
@@ -761,8 +792,14 @@ emitSuspendExpression(CIRGenFunction &cgf, CGCoroData &coro,
                   resumeEHVar(resumeEHVar.getPointer()) {}
 
             mlir::LogicalResult operator()(CIRGenFunction &cgf) override {
+              // The full-expression ends in the try block: destroy the
+              // temporaries of the resume expression, such as its result,
+              // before recording that the initial await_resume() completed,
+              // so that an exception from their destructors skips the body.
+              CIRGenFunction::RunCleanupsScope resumeCleanups(cgf);
               mlir::LogicalResult res =
                   cgf.emitStmt(tryStmt.getTryBlock(), /*useCurrentScope=*/true);
+              resumeCleanups.forceCleanup();
               cgf.getBuilder().createFlagStore(loc, true, resumeEHVar);
               return res;
             }
@@ -823,12 +860,38 @@ static RValue emitSuspendExpr(CIRGenFunction &cgf,
   mlir::Block *currEntryBlock = cgf.curLexScope->getEntryBlock();
   [[maybe_unused]] mlir::Value tmpResumeRValAddr;
 
+  // await_resume() constructs its result in the resume region of the
+  // cir.await, but a temporary result lives until the end of the
+  // full-expression. If nothing else destroys the result, the
+  // CXXBindTemporaryExpr around the call would push its destructor while the
+  // region is being emitted, and the region would end inside the cleanup
+  // scope. Instead, construct the result in a temporary that is marked as
+  // externally destructed, and push its destructor after the cir.await, as for
+  // a materialized temporary, so that it still runs at the end of the
+  // full-expression. The initial await_resume() call in a try/catch discards
+  // its result, which is destroyed in the try block.
+  QualType resultTy = e.getType();
+  QualType::DestructionKind dtorKind = resultTy.isDestructedType();
+  bool destroyResult = dtorKind != QualType::DK_none &&
+                       CIRGenFunction::hasAggregateEvaluationKind(resultTy) &&
+                       !aggSlot.isExternallyDestructed() &&
+                       !isResumeExprInTryCatch(*cgf.curCoro.data, kind, e);
+  if (destroyResult) {
+    if (aggSlot.isIgnored())
+      aggSlot = cgf.createAggTemp(resultTy, scopeLoc, "agg.tmp.ensured");
+    aggSlot.setExternallyDestructed();
+    ignoreResult = false;
+  }
+
   // No need to explicitly wrap this into a scope since the AST already uses a
   // ExprWithCleanups, which will wrap this into a cir.scope anyways.
   rval = emitSuspendExpression(cgf, *cgf.curCoro.data, e, kind, aggSlot,
                                ignoreResult, currEntryBlock, tmpResumeRValAddr,
                                /*forLValue*/ false)
              .rv;
+
+  if (destroyResult)
+    cgf.pushDestroy(dtorKind, aggSlot.getAddress(), resultTy);
 
   if (ignoreResult || rval.isIgnored())
     return rval;
