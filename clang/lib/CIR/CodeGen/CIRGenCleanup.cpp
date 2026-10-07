@@ -59,8 +59,35 @@ public:
     return true;
   }
 
-  // Don't cross evaluation-context boundaries.
-  bool TraverseLambdaExpr(LambdaExpr *) { return true; }
+  // Default arguments and default member initializers are evaluated as part
+  // of the enclosing full-expression, but are implicit code that the base
+  // visitor skips.
+  bool TraverseCXXDefaultArgExpr(CXXDefaultArgExpr *e) {
+    return TraverseStmt(e->getExpr());
+  }
+  bool TraverseCXXDefaultInitExpr(CXXDefaultInitExpr *e) {
+    return TraverseStmt(e->getExpr());
+  }
+
+  // Code generation emits the semantic form of an initializer list, which
+  // holds the default member initializers of an aggregate. The base visitor
+  // only traverses the syntactic form.
+  bool TraverseInitListExpr(InitListExpr *e) {
+    InitListExpr *semantic = e->isSemanticForm() ? e : e->getSemanticForm();
+    for (Stmt *sub : semantic->children())
+      if (!TraverseStmt(sub))
+        return false;
+    return true;
+  }
+
+  // Don't cross evaluation-context boundaries. Only the initializers of a
+  // lambda's captures are part of the enclosing full-expression.
+  bool TraverseLambdaExpr(LambdaExpr *e) {
+    for (Expr *init : e->capture_inits())
+      if (init && !TraverseStmt(init))
+        return false;
+    return true;
+  }
   bool TraverseBlockExpr(BlockExpr *) { return true; }
   bool TraverseStmtExpr(StmtExpr *) { return true; }
 };
