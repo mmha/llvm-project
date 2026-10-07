@@ -20,6 +20,7 @@
 #include "llvm/IR/Constant.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 
 using namespace llvm;
@@ -68,11 +69,24 @@ public:
     } else if (attribute.getName() == cir::CIRDialect::getSrcLocAttrName()) {
       if (mlir::failed(amendSrcLoc(instructions, attribute, moduleTranslation)))
         return mlir::failure();
+    } else if (attribute.getName() ==
+               cir::CIRDialect::getCoroOutsideFrameAttrName()) {
+      amendCoroOutsideFrame(instructions, moduleTranslation);
     }
     return mlir::success();
   }
 
 private:
+  // Keep an alloca of a coroutine out of the coroutine frame.
+  void amendCoroOutsideFrame(
+      llvm::ArrayRef<llvm::Instruction *> instructions,
+      mlir::LLVM::ModuleTranslation &moduleTranslation) const {
+    llvm::MDNode *node =
+        llvm::MDNode::get(moduleTranslation.getLLVMContext(), {});
+    for (llvm::Instruction *inst : instructions)
+      inst->setMetadata(llvm::LLVMContext::MD_coro_outside_frame, node);
+  }
+
   // Convert the raw-encoded clang::SourceLocation into !srcloc, so that
   // dontcall-error/warn works.
   mlir::LogicalResult

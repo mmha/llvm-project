@@ -2152,8 +2152,12 @@ mlir::LogicalResult CIRToLLVMAllocaOpLowering::matchAndRewrite(
   assert(!cir::MissingFeatures::addressSpace());
   assert(!cir::MissingFeatures::opAllocaAnnotations());
 
-  rewriter.replaceOpWithNewOp<mlir::LLVM::AllocaOp>(op, resultTy, elementTy,
-                                                    size, op.getAlignment());
+  auto allocaOp = rewriter.replaceOpWithNewOp<mlir::LLVM::AllocaOp>(
+      op, resultTy, elementTy, size, op.getAlignment());
+  // Translated to !coro.outside.frame metadata.
+  if (op.getCoroOutsideFrame())
+    allocaOp->setAttr(cir::CIRDialect::getCoroOutsideFrameAttrName(),
+                      rewriter.getUnitAttr());
 
   return mlir::success();
 }

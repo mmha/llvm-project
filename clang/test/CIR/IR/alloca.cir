@@ -50,6 +50,12 @@ module {
     // all flags
     %6 = cir.alloca "f" align(4) init const cleanup_dest_slot : !cir.ptr<!s32i>
 
+    // coro_outside_frame only
+    %9 = cir.alloca "j" align(4) coro_outside_frame : !cir.ptr<!s32i>
+
+    // init + coro_outside_frame
+    %10 = cir.alloca "k" align(4) init coro_outside_frame : !cir.ptr<!s32i>
+
     // dynamic size, no flags
     %sz = cir.const #cir.int<4> : !u64i
     %7 = cir.alloca "h" align(16) size(%sz) : !cir.ptr<!u8i>
@@ -66,6 +72,8 @@ module {
   // CHECK:   cir.alloca "d" align(4) init const : !cir.ptr<!s32i>
   // CHECK:   cir.alloca "e" align(4) cleanup_dest_slot : !cir.ptr<!s32i>
   // CHECK:   cir.alloca "f" align(4) init const cleanup_dest_slot : !cir.ptr<!s32i>
+  // CHECK:   cir.alloca "j" align(4) coro_outside_frame : !cir.ptr<!s32i>
+  // CHECK:   cir.alloca "k" align(4) init coro_outside_frame : !cir.ptr<!s32i>
   // CHECK:   cir.alloca "h" align(16) size(%{{.*}}) : !cir.ptr<!u8i>
   // CHECK:   cir.alloca "i" align(16) init size(%{{.*}}) : !cir.ptr<!u8i>
 }

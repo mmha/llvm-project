@@ -1,5 +1,8 @@
 // RUN: cir-opt %s -cir-to-llvm -o - | FileCheck %s -check-prefix=MLIR
-// RUN: cir-opt %s -cir-to-llvm -o - | cir-translate -mlir-to-llvmir | FileCheck %s -check-prefix=LLVM
+// cir-translate -cir-to-llvmir registers the CIR translation interface that
+// turns cir.coro_outside_frame into !coro.outside.frame metadata. Piping cir-opt
+// into cir-translate -mlir-to-llvmir would drop it.
+// RUN: cir-translate %s -cir-to-llvmir --target x86_64-unknown-linux-gnu --disable-cc-lowering -o - | FileCheck %s -check-prefix=LLVM
 
 // A coroutine whose cir.coroutine has been flattened lowers to a function
 // that the LLVM coroutine passes split.
@@ -12,6 +15,13 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu"} {
   cir.func @not_coro() {
     cir.return
   }
+
+  // An alloca that the coroutine passes must keep out of the coroutine frame.
+  cir.func coroutine @outside_frame() {
+    %0 = cir.alloca "outside" align(4) coro_outside_frame : !cir.ptr<!cir.int<s, 32>>
+    %1 = cir.alloca "inside" align(4) : !cir.ptr<!cir.int<s, 32>>
+    cir.return
+  }
 }
 
 // MLIR-LABEL: llvm.func @coro()
@@ -22,4 +32,14 @@ module attributes {cir.triple = "x86_64-unknown-linux-gnu"} {
 
 // LLVM: define void @coro() #[[ATTRS:[0-9]+]]
 // LLVM: define void @not_coro() {
+
+// MLIR-LABEL: llvm.func @outside_frame()
+// MLIR:         llvm.alloca %{{.*}} x i32 {cir.coro_outside_frame, alignment = 4 : i64}
+// MLIR:         llvm.alloca %{{.*}} x i32 {alignment = 4 : i64}
+
+// LLVM:      define void @outside_frame()
+// LLVM-NEXT:   alloca i32, align 4, !coro.outside.frame ![[EMPTY:[0-9]+]]
+// LLVM-NEXT:   alloca i32, align 4{{$}}
+
 // LLVM: attributes #[[ATTRS]] = { presplitcoroutine }
+// LLVM: ![[EMPTY]] = !{}

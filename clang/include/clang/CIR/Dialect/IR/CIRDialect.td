@@ -63,6 +63,7 @@ def CIR_Dialect : Dialect {
     static llvm::StringRef getDontCallErrorAttrName() { return "dontcall-error"; }
     static llvm::StringRef getDontCallWarnAttrName() { return "dontcall-warn"; }
     static llvm::StringRef getSrcLocAttrName() { return "cir.srcloc"; }
+    static llvm::StringRef getCoroOutsideFrameAttrName() { return "cir.coro_outside_frame"; }
     static llvm::StringRef getNoUnwindAttrName() { return "nounwind"; }
     static llvm::StringRef getWillReturnAttrName() { return "willreturn"; }
     static llvm::StringRef getModuleLevelAsmAttrName() { return "cir.module_asm"; }

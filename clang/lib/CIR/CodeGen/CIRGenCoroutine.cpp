@@ -488,10 +488,21 @@ CIRGenFunction::emitCoroutineBody(const CoroutineBodyStmt &s) {
     assert(!cir::MissingFeatures::coroUnwindRegion());
     CapturedCleanups frameCleanups(*this, /*active=*/true);
 
+    // Like classic CodeGen, keep the original parameters out of the coroutine
+    // frame: only the ramp function uses them, to initialize the copies that
+    // the coroutine body uses. A parameter that is destroyed in the callee, as
+    // with `trivial_abi` or in the MSVC C++ ABI, is destroyed at the end of the
+    // ramp function, after the coroutine may have been destroyed, so its
+    // storage must not be in the frame. CIR does not destroy such parameters
+    // in the callee yet.
+    for (const ParmVarDecl *parm : fnArgs)
+      if (auto parmAlloca =
+              getAddrOfLocalVar(parm).getDefiningOp<cir::AllocaOp>())
+        parmAlloca.setCoroOutsideFrame(true);
+
     // Create parameter copies. We do it before creating a promise, since an
     // evolution of coroutine TS may allow promise constructor to observe
     // parameter copies.
-    assert(!cir::MissingFeatures::coroOutsideFrameMD());
     for (auto *pm : paramMoves) {
       const auto *paramMove = cast<DeclStmt>(pm);
       emitAutoVarDeclWithCapturedCleanups(
