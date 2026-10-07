@@ -2387,6 +2387,28 @@ static void prepareCoroutine(cir::CoroutineOp coroOp,
 // cir.coro.suspend_exit becomes a branch to the exit region. The cir.goto ops
 // to the final_suspend and destroy regions stay for the goto solver.
 //
+// A non-empty gro region runs when the ramp function returns to its caller,
+// like the delayed conversion of the return object in classic CodeGen.
+// The suspensions and the end of final_suspend branch to it through a block
+// that tests whether the code runs in the ramp function, and a block after it
+// continues to the region they would have branched to without it:
+//
+//     ...                              // final_suspend
+//     %true = cir.const #true
+//     cir.br ^gro.guard(%true : !cir.bool)
+//   ^gro.guard(%completed: !cir.bool):
+//     %in_ramp = cir.coro.intrinsic.is_in_ramp() : () -> !cir.bool
+//     cir.brcond %in_ramp ^gro, ^gro.done
+//   ^gro:
+//     ...                              // gro
+//     cir.br ^gro.done
+//   ^gro.done:
+//     cir.brcond %completed ^destroy, ^exit
+//   ^destroy:
+//     ...
+//
+// Each cir.coro.suspend_exit branches to ^gro.guard with false.
+//
 // The coroutine keyword of the function stays, so that the function is lowered
 // as a coroutine that the LLVM coroutine passes split.
 //
@@ -2409,39 +2431,103 @@ public:
     mlir::Location loc = coroOp.getLoc();
     assert(!cir::MissingFeatures::coroUnwindRegion());
 
-    std::array<mlir::Region *, 5> regions = {
-        &coroOp.getInitialSuspend(), &coroOp.getBody(),
-        &coroOp.getFinalSuspend(), &coroOp.getDestroy(), &coroOp.getExit()};
-    mlir::Block *initialSuspendEntry = &regions.front()->front();
-    mlir::Block *exitEntry = &regions.back()->front();
+    mlir::Region &initialSuspend = coroOp.getInitialSuspend();
+    mlir::Region &body = coroOp.getBody();
+    mlir::Region &finalSuspend = coroOp.getFinalSuspend();
+    mlir::Region &gro = coroOp.getGro();
+    mlir::Region &destroy = coroOp.getDestroy();
+    mlir::Region &exit = coroOp.getExit();
+    bool hasGro = !gro.empty();
 
-    // Each region but exit falls through to the next one.
-    for (auto [region, next] :
-         llvm::zip(llvm::drop_end(regions), llvm::drop_begin(regions))) {
+    auto collectYields = [](mlir::Region &region) {
       llvm::SmallVector<cir::YieldOp> yields;
-      for (mlir::Block &block : *region)
+      for (mlir::Block &block : region)
         if (auto yield = dyn_cast<cir::YieldOp>(block.getTerminator()))
           yields.push_back(yield);
-      for (cir::YieldOp yield : yields)
-        lowerTerminator(yield, &next->front(), rewriter);
-    }
-
-    // A suspended coroutine returns through the exit region.
+      return yields;
+    };
+    llvm::SmallVector<cir::YieldOp> initialSuspendYields =
+        collectYields(initialSuspend);
+    llvm::SmallVector<cir::YieldOp> bodyYields = collectYields(body);
+    llvm::SmallVector<cir::YieldOp> finalSuspendYields =
+        collectYields(finalSuspend);
+    llvm::SmallVector<cir::YieldOp> groYields = collectYields(gro);
+    llvm::SmallVector<cir::YieldOp> destroyYields = collectYields(destroy);
     llvm::SmallVector<cir::CoroSuspendExitOp> suspendExits;
     coroOp->walk([&](cir::CoroSuspendExitOp suspendExit) {
       suspendExits.push_back(suspendExit);
     });
-    for (cir::CoroSuspendExitOp suspendExit : suspendExits)
-      lowerTerminator(suspendExit, exitEntry, rewriter);
 
+    mlir::Block *initialSuspendEntry = &initialSuspend.front();
+    mlir::Block *bodyEntry = &body.front();
+    mlir::Block *finalSuspendEntry = &finalSuspend.front();
+    mlir::Block *groEntry = hasGro ? &gro.front() : nullptr;
+    mlir::Block *destroyEntry = &destroy.front();
+    mlir::Block *exitEntry = &exit.front();
+
+    // Inline the regions in order, with the blocks that guard gro around it.
     mlir::Block *currentBlock = rewriter.getInsertionBlock();
     mlir::Block *continueBlock =
         rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
-    for (mlir::Region *region : regions)
-      rewriter.inlineRegionBefore(*region, continueBlock);
+    rewriter.inlineRegionBefore(initialSuspend, continueBlock);
+    rewriter.inlineRegionBefore(body, continueBlock);
+    rewriter.inlineRegionBefore(finalSuspend, continueBlock);
+    mlir::Block *groGuard = nullptr;
+    mlir::Block *groDone = nullptr;
+    auto boolTy = cir::BoolType::get(rewriter.getContext());
+    if (hasGro) {
+      groGuard = rewriter.createBlock(continueBlock, {boolTy}, {loc});
+      rewriter.inlineRegionBefore(gro, continueBlock);
+      groDone = rewriter.createBlock(continueBlock);
+    }
+    rewriter.inlineRegionBefore(destroy, continueBlock);
+    rewriter.inlineRegionBefore(exit, continueBlock);
 
     rewriter.setInsertionPointToEnd(currentBlock);
     cir::BrOp::create(rewriter, loc, initialSuspendEntry);
+
+    for (cir::YieldOp yield : initialSuspendYields)
+      lowerTerminator(yield, bodyEntry, rewriter);
+    for (cir::YieldOp yield : bodyYields)
+      lowerTerminator(yield, finalSuspendEntry, rewriter);
+    for (cir::YieldOp yield : destroyYields)
+      lowerTerminator(yield, exitEntry, rewriter);
+
+    if (!hasGro) {
+      // A completed coroutine is destroyed, a suspended one returns through
+      // the exit region.
+      for (cir::YieldOp yield : finalSuspendYields)
+        lowerTerminator(yield, destroyEntry, rewriter);
+      for (cir::CoroSuspendExitOp suspendExit : suspendExits)
+        lowerTerminator(suspendExit, exitEntry, rewriter);
+      rewriter.eraseOp(coroOp);
+      return mlir::success();
+    }
+
+    // Both go through gro first, which tells them apart by the argument of
+    // ^gro.guard.
+    auto branchToGroGuard = [&](mlir::Operation *terminator, bool completed) {
+      rewriter.setInsertionPoint(terminator);
+      mlir::Value completedValue = cir::ConstantOp::create(
+          rewriter, loc, cir::BoolAttr::get(rewriter.getContext(), completed));
+      rewriter.replaceOpWithNewOp<cir::BrOp>(terminator, groGuard,
+                                             completedValue);
+    };
+    for (cir::YieldOp yield : finalSuspendYields)
+      branchToGroGuard(yield, /*completed=*/true);
+    for (cir::CoroSuspendExitOp suspendExit : suspendExits)
+      branchToGroGuard(suspendExit, /*completed=*/false);
+    for (cir::YieldOp yield : groYields)
+      lowerTerminator(yield, groDone, rewriter);
+
+    // Only the ramp function runs gro.
+    rewriter.setInsertionPointToEnd(groGuard);
+    mlir::Value inRamp = cir::CoroIsInRampOp::create(rewriter, loc, boolTy);
+    cir::BrCondOp::create(rewriter, loc, inRamp, groEntry, groDone);
+
+    rewriter.setInsertionPointToEnd(groDone);
+    cir::BrCondOp::create(rewriter, loc, groGuard->getArgument(0), destroyEntry,
+                          exitEntry);
 
     rewriter.eraseOp(coroOp);
     return mlir::success();

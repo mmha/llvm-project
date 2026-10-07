@@ -548,3 +548,104 @@ cir.func coroutine @in_try(%awaiter : !cir.ptr<!void>, %frame : !cir.ptr<!void>)
 // CHECK:         cir.return
 // CHECK:       ^[[UNWIND]]:
 // CHECK-NEXT:    cir.eh.initiate
+
+// A gro region runs once, in the ramp function, when the coroutine first
+// returns to its caller: on a suspension, before exit, and when the coroutine
+// runs to completion, before destroy. Both branch to a block that runs it only
+// if cir.coro.intrinsic.is_in_ramp returns true, with an argument that tells
+// where to continue. The destroy edges of the suspend points skip it.
+
+cir.func private @convert(!cir.ptr<!s32i>)
+
+cir.func coroutine @gro(%awaiter : !cir.ptr<!void>, %frame : !cir.ptr<!void>, %gro : !cir.ptr<!s32i>) {
+  cir.coroutine initialSuspend : {
+    cir.await(init, ready : {
+      %r = cir.call @ready() : () -> !cir.bool
+      cir.condition(%r)
+    }, suspend : {
+      cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @wrapper_void) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+      cir.coro.suspend_point
+    }, resume : {
+      cir.yield
+    },)
+    cir.yield
+  }, body : {
+    cir.call @body() : () -> ()
+    cir.co_return
+  }, finalSuspend : {
+    cir.await(final, ready : {
+      %r = cir.call @ready() : () -> !cir.bool
+      cir.condition(%r)
+    }, suspend : {
+      cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @wrapper_void) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+      cir.coro.suspend_point
+    }, resume : {
+      cir.yield
+    },)
+    cir.yield
+  }, gro : {
+    cir.cleanup.scope {
+      cir.call @convert(%gro) : (!cir.ptr<!s32i>) -> ()
+      cir.yield
+    } cleanup normal {
+      cir.call @dtor(%gro) : (!cir.ptr<!s32i>) -> ()
+      cir.yield
+    }
+    cir.yield
+  }, destroy : {
+    cir.call @free_frame() : () -> ()
+    cir.yield
+  }, exit : {
+    cir.call @end() : () -> ()
+    cir.return
+  }
+  cir.trap
+}
+
+// CHECK-LABEL: cir.func coroutine @gro(
+// CHECK-SAME:      %{{.*}}: !cir.ptr<!void>, %{{.*}}: !cir.ptr<!void>, %[[GRO:.*]]: !cir.ptr<!s32i>)
+// CHECK-NOT:     cir.coroutine
+// CHECK:         cir.switch.flat %{{.*}} : !u8i, ^[[INIT_SUSPENDED:bb[0-9]+]] [
+// CHECK-NEXT:      0: ^{{bb[0-9]+}},
+// CHECK-NEXT:      1: ^[[INIT_DESTROYED:bb[0-9]+]]
+// CHECK-NEXT:    ]
+// CHECK:       ^[[INIT_DESTROYED]]:
+// CHECK-NEXT:    cir.goto "coro.destroy"
+// CHECK:       ^[[INIT_SUSPENDED]]:
+// CHECK-NEXT:    %[[FALSE:.*]] = cir.const #false
+// CHECK-NEXT:    cir.br ^[[GRO_GUARD:bb[0-9]+]](%[[FALSE]] : !cir.bool)
+//
+// CHECK:         cir.label "coro.final"
+// CHECK:         cir.switch.flat %{{.*}} : !u8i, ^[[FINAL_SUSPENDED:bb[0-9]+]] [
+// CHECK-NEXT:      0: ^[[FINAL_RESUME:bb[0-9]+]],
+// CHECK-NEXT:      1: ^[[FINAL_DESTROYED:bb[0-9]+]]
+// CHECK-NEXT:    ]
+// CHECK:       ^[[FINAL_DESTROYED]]:
+// CHECK-NEXT:    cir.goto "coro.destroy"
+// CHECK:       ^[[FINAL_SUSPENDED]]:
+// CHECK-NEXT:    %[[FALSE:.*]] = cir.const #false
+// CHECK-NEXT:    cir.br ^[[GRO_GUARD]](%[[FALSE]] : !cir.bool)
+// CHECK:       ^[[FINAL_RESUME]]:
+// CHECK-NEXT:    cir.br ^[[FINAL_CONT:bb[0-9]+]]
+// CHECK:       ^[[FINAL_CONT]]:
+// CHECK-NEXT:    %[[TRUE:.*]] = cir.const #true
+// CHECK-NEXT:    cir.br ^[[GRO_GUARD]](%[[TRUE]] : !cir.bool)
+//
+// CHECK:       ^[[GRO_GUARD]](%[[COMPLETED:.*]]: !cir.bool):
+// CHECK-NEXT:    %[[IN_RAMP:.*]] = cir.coro.intrinsic.is_in_ramp() : () -> !cir.bool
+// CHECK-NEXT:    cir.brcond %[[IN_RAMP]] ^[[GRO_ENTRY:bb[0-9]+]], ^[[GRO_DONE:bb[0-9]+]]
+// CHECK:       ^[[GRO_ENTRY]]:
+// CHECK:         cir.call @convert(%[[GRO]])
+// CHECK:         cir.call @dtor(%[[GRO]])
+// CHECK:         cir.br ^[[GRO_DONE]]
+// CHECK:       ^[[GRO_DONE]]:
+// CHECK-NEXT:    cir.brcond %[[COMPLETED]] ^[[DESTROY:bb[0-9]+]], ^[[EXIT:bb[0-9]+]]
+//
+// CHECK:       ^[[DESTROY]]:
+// CHECK-NEXT:    cir.label "coro.destroy"
+// CHECK-NEXT:    cir.call @free_frame()
+// CHECK-NEXT:    cir.br ^[[EXIT]]
+//
+// CHECK:       ^[[EXIT]]:
+// CHECK-NEXT:    cir.call @end()
+// CHECK-NEXT:    cir.return

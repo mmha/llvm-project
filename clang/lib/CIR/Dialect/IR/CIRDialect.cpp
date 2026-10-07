@@ -3673,6 +3673,7 @@ void cir::CoroutineOp::build(OpBuilder &builder, OperationState &result,
                              BuilderCallbackRef initialSuspendBuilder,
                              BuilderCallbackRef bodyBuilder,
                              BuilderCallbackRef finalSuspendBuilder,
+                             BuilderCallbackRef groBuilder,
                              BuilderCallbackRef destroyBuilder,
                              BuilderCallbackRef exitBuilder) {
   {
@@ -3694,6 +3695,15 @@ void cir::CoroutineOp::build(OpBuilder &builder, OperationState &result,
     Region *finalRegion = result.addRegion();
     builder.createBlock(finalRegion);
     finalSuspendBuilder(builder, result.location);
+  }
+
+  {
+    OpBuilder::InsertionGuard guard(builder);
+    Region *groRegion = result.addRegion();
+    if (groBuilder) {
+      builder.createBlock(groRegion);
+      groBuilder(builder, result.location);
+    }
   }
 
   {
@@ -3723,6 +3733,10 @@ void cir::CoroutineOp::getSuccessorRegions(
   mlir::Region *parent =
       point.getTerminatorPredecessorOrNull()->getParentRegion();
 
+  // A suspension in the ramp function returns to the caller through gro, if
+  // the coroutine has one. Other suspensions go straight to exit.
+  bool hasGro = !getGro().empty();
+
   // initial_suspend either falls into body (resumed, or never actually
   // suspended because await_ready() was true), exits directly (a plain
   // suspend here means nobody has resumed yet, so we just return to the
@@ -3730,6 +3744,8 @@ void cir::CoroutineOp::getSuccessorRegions(
   // suspended at its initial suspend point.
   if (parent == &getInitialSuspend()) {
     regions.emplace_back(&getBody());
+    if (hasGro)
+      regions.emplace_back(&getGro());
     regions.emplace_back(&getExit());
     regions.emplace_back(&getDestroy());
     return;
@@ -3740,6 +3756,8 @@ void cir::CoroutineOp::getSuccessorRegions(
   // from a suspend_point being destroyed.
   if (parent == &getBody()) {
     regions.emplace_back(&getFinalSuspend());
+    if (hasGro)
+      regions.emplace_back(&getGro());
     regions.emplace_back(&getExit());    // any suspend_point inside body
     regions.emplace_back(&getDestroy()); // destroy() on any suspend inside body
     return;
@@ -3749,8 +3767,19 @@ void cir::CoroutineOp::getSuccessorRegions(
   // coroutine (the final await does not suspend), and exits when the coroutine
   // suspends at its final suspend point. The latter is common: the coroutine
   // stays suspended until destroy() is called, which then reaches destroy.
-  // Only resuming it through its handle is undefined behavior.
+  // Only resuming it through its handle is undefined behavior. Both go through
+  // gro first in the ramp function.
   if (parent == &getFinalSuspend()) {
+    if (hasGro)
+      regions.emplace_back(&getGro());
+    regions.emplace_back(&getDestroy());
+    regions.emplace_back(&getExit());
+    return;
+  }
+
+  // gro continues to destroy if the coroutine completed without suspending,
+  // and to exit if it suspended.
+  if (parent == &getGro()) {
     regions.emplace_back(&getDestroy());
     regions.emplace_back(&getExit());
     return;
@@ -3781,6 +3810,7 @@ LogicalResult cir::CoroutineOp::verify() {
   mlir::Region &initialSuspend = getInitialSuspend();
   mlir::Region &body = getBody();
   mlir::Region &finalSuspend = getFinalSuspend();
+  mlir::Region &gro = getGro();
   mlir::Region &destroy = getDestroy();
   mlir::Region &exit = getExit();
 
@@ -3840,6 +3870,11 @@ LogicalResult cir::CoroutineOp::verify() {
     return emitOpError(
         "must have one or zero 'final' cir.await in 'final_suspend'");
 
+  // gro runs on the way out of the ramp function, it cannot suspend.
+  if (gro.walk([](AwaitOp) { return mlir::WalkResult::interrupt(); })
+          .wasInterrupted())
+    return emitOpError("'gro' must not contain any cir.await");
+
   // Each region must end with the terminator its role requires:
   // initial_suspend/final_suspend/destroy yield back into cir.coroutine's
   // own control flow, body ends in a cir.co_return (or a plain yield if
@@ -3859,6 +3894,10 @@ LogicalResult cir::CoroutineOp::verify() {
     return emitOpError("'final_suspend' region must not be empty");
   if (!isa<YieldOp>(finalSuspend.back().back()))
     return emitOpError("'final_suspend' must end with cir.yield");
+
+  // gro is optional.
+  if (!gro.empty() && (gro.back().empty() || !isa<YieldOp>(gro.back().back())))
+    return emitOpError("'gro' must end with cir.yield");
 
   if (destroy.empty() || destroy.back().empty())
     return emitOpError("'destroy' region must not be empty");

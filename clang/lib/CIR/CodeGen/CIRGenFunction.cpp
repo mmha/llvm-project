@@ -514,6 +514,7 @@ void CIRGenFunction::startFunction(GlobalDecl gd, QualType returnType,
 
   didCallStackSave = false;
   curCodeDecl = d;
+  fnRetTy = returnType;
   const auto *fd = dyn_cast_or_null<FunctionDecl>(d);
   curFuncDecl = (d ? d->getNonClosureContext() : nullptr);
 

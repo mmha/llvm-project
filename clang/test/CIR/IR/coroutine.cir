@@ -78,3 +78,52 @@ cir.func coroutine @flat_awaits(%arg0 : !cir.bool) {
 // CHECK:   cir.switch.flat %{{.*}} : !u8i, ^[[SUSPENDED:bb[0-9]+]] [
 // CHECK:   ^[[SUSPENDED]]:
 // CHECK-NEXT: cir.coro.suspend_exit
+
+// A coroutine whose get_return_object() result is converted to the return type
+// in the gro region. The gro region is printed only when it is not empty.
+
+!s32i = !cir.int<s, 32>
+
+cir.func coroutine @gro_conversion(%arg0 : !cir.bool, %n : !s32i) -> !s32i {
+  %param = cir.alloca "n" align(4) init coro_outside_frame : !cir.ptr<!s32i>
+  %retval = cir.alloca "__retval" align(4) coro_outside_frame : !cir.ptr<!s32i>
+  %gro = cir.alloca "__coro_gro" align(4) init coro_outside_frame : !cir.ptr<!s32i>
+  cir.store %n, %param : !s32i, !cir.ptr<!s32i>
+  cir.coroutine initialSuspend : {
+    cir.await(init, ready : {
+      cir.condition(%arg0)
+    }, suspend : {
+      cir.coro.suspend_point
+    }, resume : {
+      cir.yield
+    },)
+    cir.yield
+  }, body : {
+    cir.yield
+  }, finalSuspend : {
+    cir.yield
+  }, gro : {
+    %v = cir.load %gro : !cir.ptr<!s32i>, !s32i
+    cir.store %v, %retval : !s32i, !cir.ptr<!s32i>
+    cir.yield
+  }, destroy : {
+    cir.yield
+  }, exit : {
+    %r = cir.load %retval : !cir.ptr<!s32i>, !s32i
+    cir.return %r : !s32i
+  }
+  cir.trap
+}
+
+// CHECK: cir.func coroutine @gro_conversion
+// CHECK:   cir.alloca "n" align(4) init coro_outside_frame : !cir.ptr<!s32i>
+// CHECK:   cir.alloca "__retval" align(4) coro_outside_frame : !cir.ptr<!s32i>
+// CHECK:   cir.alloca "__coro_gro" align(4) init coro_outside_frame : !cir.ptr<!s32i>
+// CHECK:   cir.coroutine initialSuspend : {
+// CHECK:   }, finalSuspend : {
+// CHECK-NEXT: cir.yield
+// CHECK-NEXT: }, gro : {
+// CHECK-NEXT: cir.load
+// CHECK-NEXT: cir.store
+// CHECK-NEXT: cir.yield
+// CHECK-NEXT: }, destroy : {

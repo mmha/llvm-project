@@ -750,7 +750,9 @@ def CIR_AllocaOp : CIR_Op<"alloca", [
     the coroutine frame: the LLVM coroutine passes leave it on the stack of the
     ramp function even if it is used across a suspend point. It marks storage
     that only the ramp function uses, such as the original parameters, which
-    the coroutine body accesses through their copies.
+    the coroutine body accesses through their copies, and the result of
+    `get_return_object()` and the return value when `get_return_object()`
+    returns a type other than the return type of the coroutine.
 
     The result type is a pointer to the input's type.
 
@@ -4836,9 +4838,9 @@ def CIR_CoroutineOp : CIR_Op<"coroutine", [
 
   let summary = "Groups a coroutine's structured suspend/resume/destroy control flow";
   let description = [{
-    `cir.coroutine` is an op consisting of five regions: `initial_suspend`,
-    `body`, `final_suspend`, `destroy`, and `exit`. The `gro` and `unwind`
-    regions are TODO.
+    `cir.coroutine` is an op consisting of six regions: `initial_suspend`,
+    `body`, `final_suspend`, `gro`, `destroy`, and `exit`. The `gro` region
+    may be empty. The `unwind` region is TODO.
 
     - `initial_suspend`: the coroutine ramp/setup region. Its `cir.await` marked
       `init` is the ramp boundary: the coroutine frame and its associated state
@@ -4861,7 +4863,20 @@ def CIR_CoroutineOp : CIR_Op<"coroutine", [
       final suspend point is valid: the coroutine stays suspended until it is
       destroyed. Resuming it through its handle is undefined behavior.
 
-    - `gro`: TODO.
+    - `gro`: initializes the return value of the coroutine from the result of
+      `get_return_object()` when their types differ. That result is then held
+      in a variable that `initial_suspend` initializes (`__coro_gro` in the
+      AST), and the conversion is delayed until the ramp function returns to
+      the caller. This region converts the variable to the return type,
+      destroys it, and ends with `cir.yield`. It runs once, in the ramp
+      function: after the coroutine suspends in it, before `exit`, or, if the
+      coroutine runs to completion in it, after `final_suspend` and before
+      `destroy`, while the coroutine state still exists. Suspensions and
+      completions after the coroutine has been resumed skip it, and so does
+      destroying a suspended coroutine. The region is empty when the
+      coroutine returns void, and when `get_return_object()` returns the
+      return type of the coroutine up to cv-qualifiers: `initial_suspend` then
+      initializes the return value with its result right away.
 
     - `unwind`: TODO.
 
@@ -4869,14 +4884,14 @@ def CIR_CoroutineOp : CIR_Op<"coroutine", [
       parameter copies, then the coroutine frame (`coro.free` + `delete`).
       Reached by an explicit `destroy()` call on a handle suspended at any
       suspend point, including the initial and final ones, or by normal
-      completion through `final_suspend`, and falls through to `exit`. It
-      runs the destructors unconditionally, so an exception must not reach
-      it. Exceptional exits are not modeled yet (see `unwind`).
+      completion through `final_suspend` (and `gro`), and falls through to
+      `exit`. It runs the destructors unconditionally, so an exception must
+      not reach it. Exceptional exits are not modeled yet (see `unwind`).
 
-    - `exit`: the shared return-to-caller path. Reached directly from any
-      suspend point that isn't being destroyed (the coroutine is just
-      pausing), and from `destroy` when it was entered via ordinary
-      dispatch. Holds `coro.end` + the actual `cir.return`.
+    - `exit`: the shared return-to-caller path. Reached from any suspend
+      point that isn't being destroyed (the coroutine is just pausing),
+      through `gro` in the ramp function, and from `destroy` when it was
+      entered via ordinary dispatch. Holds `coro.end` + the actual `cir.return`.
 
     The CFG flattening pass inlines the regions into the function in the
     order above. Each region falls through to the next one, and `exit` returns
@@ -4886,21 +4901,52 @@ def CIR_CoroutineOp : CIR_Op<"coroutine", [
     `llvm/docs/Coroutines.md`): the coroutine continues in the `resume` region
     of the `cir.await`, branches to `destroy` through the cleanups of the
     scopes it leaves, or branches to `exit` without running any cleanup.
+
+    If the `gro` region is not empty, the suspensions and the end of
+    `final_suspend` branch to a block that runs `gro` only if
+    `cir.coro.intrinsic.is_in_ramp` returns true, and then continues to `exit`
+    after a suspension and to `destroy` after the completion of the coroutine.
+
+    Example:
+
+    ```mlir
+    cir.coroutine initialSuspend : {
+      // promise, %gro = get_return_object(), co_await initial_suspend()
+      cir.yield
+    }, body : {
+      cir.yield
+    }, finalSuspend : {
+      // co_await final_suspend()
+      cir.yield
+    }, gro : {
+      // %retval = Task(std::move(%gro)), then ~GRO()
+      cir.yield
+    }, destroy : {
+      // ~promise(), operator delete
+      cir.yield
+    }, exit : {
+      // coro.end
+      cir.return
+    }
+    ```
   }];
 
-  // TODO(cir): Add GRO and EH
+  // TODO(cir): Add EH
   let regions = (region AnyRegion:$initialSuspend,
                         AnyRegion:$body,
                         AnyRegion:$finalSuspend,
+                        AnyRegion:$gro,
                         AnyRegion:$destroy,
                         AnyRegion:$exit);
 
   let skipDefaultBuilders = 1;
 
+  // The gro region is left empty if groBuilder is null.
   let builders = [
     OpBuilder<(ins "BuilderCallbackRef":$initialSuspendBuilder,
       "BuilderCallbackRef":$bodyBuilder,
       "BuilderCallbackRef":$finalSuspendBuilder,
+      "BuilderCallbackRef":$groBuilder,
       "BuilderCallbackRef":$destroyBuilder,
       "BuilderCallbackRef":$exitBuilder)>
   ];
@@ -4909,6 +4955,7 @@ def CIR_CoroutineOp : CIR_Op<"coroutine", [
     `initialSuspend` `:` $initialSuspend `,`
     `body` `:` $body `,`
     `finalSuspend` `:` $finalSuspend `,`
+    (`gro` `:` $gro^ `,`)?
     `destroy` `:` $destroy `,`
     `exit` `:` $exit
     attr-dict
@@ -5555,7 +5602,8 @@ def CIR_CoroSuspendExitOp : CIR_Op<"coro.suspend_exit", [
     after the coroutine has suspended, so that the function returns to its
     caller or resumer while the coroutine stays suspended. It is the path
     taken when `cir.coro.intrinsic.suspend` returns neither 0 (resumed) nor
-    1 (destroyed).
+    1 (destroyed). If the `cir.coroutine` has a `gro` region, that region runs
+    first when the coroutine suspends in the ramp function.
 
     The coroutine returns without exiting any scope ([expr.await]p5.1,
     [stmt.jump.general]p2): no cleanup runs and every object stays alive in
@@ -5565,7 +5613,8 @@ def CIR_CoroSuspendExitOp : CIR_Op<"coro.suspend_exit", [
 
     The operation only exists during the flattening of a coroutine: the
     flattening of a `cir.await` creates it, and the flattening of the
-    enclosing `cir.coroutine` replaces it with a branch to the `exit` region.
+    enclosing `cir.coroutine` replaces it with a branch to the `exit` region,
+    or to the block that runs the `gro` region in the ramp function.
 
     Example:
 

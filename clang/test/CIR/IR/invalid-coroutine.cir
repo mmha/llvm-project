@@ -290,6 +290,65 @@ cir.func coroutine @final_suspend_invalid_await(%arg0 : !cir.bool) {
 
 // -----
 
+cir.func coroutine @gro_wrong_terminator(%arg0 : !cir.bool) {
+  cir.coroutine initialSuspend : { // expected-error {{'gro' must end with cir.yield}}
+    cir.await(init, ready : {
+      cir.condition(%arg0)
+    }, suspend : {
+      cir.coro.suspend_point
+    }, resume : {
+      cir.yield
+    },)
+    cir.yield
+  }, body : {
+    cir.yield
+  }, finalSuspend : {
+    cir.yield
+  }, gro : {
+    cir.return
+  }, destroy : {
+    cir.yield
+  }, exit : {
+    cir.return
+  }
+  cir.trap
+}
+
+// -----
+
+cir.func coroutine @gro_await(%arg0 : !cir.bool) {
+  cir.coroutine initialSuspend : { // expected-error {{'gro' must not contain any cir.await}}
+    cir.await(init, ready : {
+      cir.condition(%arg0)
+    }, suspend : {
+      cir.coro.suspend_point
+    }, resume : {
+      cir.yield
+    },)
+    cir.yield
+  }, body : {
+    cir.yield
+  }, finalSuspend : {
+    cir.yield
+  }, gro : {
+    cir.await(user, ready : {
+      cir.condition(%arg0)
+    }, suspend : {
+      cir.coro.suspend_point
+    }, resume : {
+      cir.yield
+    },)
+    cir.yield
+  }, destroy : {
+    cir.yield
+  }, exit : {
+    cir.return
+  }
+  cir.trap
+}
+
+// -----
+
 cir.func @suspend_exit_outside_coroutine() {
   cir.coro.suspend_exit // expected-error {{expects ancestor op 'cir.coroutine'}}
 }

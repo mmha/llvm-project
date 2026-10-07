@@ -122,6 +122,155 @@ struct ParamReferenceReplacerRAII {
     }
   }
 };
+
+// Emits the return value of a coroutine, like GetReturnObjectManager in classic
+// CodeGen.
+//
+// The result of get_return_object() initializes the return value, and the call
+// is sequenced before initial_suspend ([dcl.fct.def.coroutine]p7). When the
+// result has the return type of the coroutine, it is constructed in the return
+// slot right away. Otherwise Sema declares a variable for it (__coro_gro), and
+// the return value is converted from that variable when the ramp function
+// returns to the caller (see https://github.com/cplusplus/papers/issues/1414).
+// The gro region of the cir.coroutine does the conversion and destroys the
+// variable. If the variable has the return type up to cv-qualifiers, Sema makes
+// `return __coro_gro;` an NRVO return instead: the variable is constructed in
+// the return slot, and nothing converts or destroys it.
+class GetReturnObjectManager {
+  CIRGenFunction &cgf;
+  const CoroutineBodyStmt &s;
+  // Whether get_return_object() returns the return type of the coroutine.
+  bool directEmit;
+  // The variable that holds the result of get_return_object(), if the
+  // coroutine returns a value of another type.
+  const VarDecl *groVar = nullptr;
+  // Whether that variable is the return value (NRVO).
+  bool groInReturnSlot = false;
+  CIRGenFunction::AutoVarEmission groEmission =
+      CIRGenFunction::AutoVarEmission::invalid();
+  // The cleanups that the alloca of the variable pushes, such as the end of its
+  // lifetime, emitted into the gro region.
+  std::optional<CIRGenFunction::CapturedCleanups> groAllocaCleanups;
+
+public:
+  GetReturnObjectManager(CIRGenFunction &cgf, const CoroutineBodyStmt &s)
+      : cgf(cgf), s(s) {
+    QualType groType = s.getReturnValueInit()->getType();
+    directEmit = cgf.getContext().hasSameType(groType, cgf.fnRetTy);
+    // If the coroutine returns void, the result of get_return_object() is
+    // discarded, and the result declaration is the call itself.
+    if (!directEmit)
+      if (auto *groDeclStmt = dyn_cast_or_null<DeclStmt>(s.getResultDecl()))
+        groVar = cast<VarDecl>(groDeclStmt->getSingleDecl());
+    groInReturnSlot = groVar && cgf.getLangOpts().ElideConstructors &&
+                      groVar->isNRVOVariable();
+  }
+
+  // Whether the cir.coroutine needs a gro region.
+  bool hasDelayedConversion() const { return groVar && !groInReturnSlot; }
+
+  // Emitted after the promise: calls get_return_object().
+  void emitGroInit() {
+    if (directEmit) {
+      // returnValue should be valid as long as the coroutine's return type
+      // is not void. The assertion could help us to reduce the check later.
+      assert(cgf.returnValue.isValid() == (bool)s.getReturnStmt());
+      if (cgf.returnValue.isValid()) {
+        // The call to get_return_object() is a full-expression, but Sema does
+        // not wrap it in an ExprWithCleanups when its type matches the return
+        // type. Destroy its temporaries here, so that their cleanups do not
+        // outlive initial_suspend. Classic CodeGen leaves their cleanups on
+        // the EH stack and destroys them only with the coroutine state.
+        CIRGenFunction::FullExprCleanupScope groScope(cgf, s.getReturnValue());
+        cgf.emitAnyExprToMem(s.getReturnValue(), cgf.returnValue,
+                             s.getReturnValue()->getType().getQualifiers(),
+                             /*isInit=*/true);
+      }
+      return;
+    }
+
+    if (!groVar) {
+      // The coroutine returns void, and the result of get_return_object() is
+      // discarded. Like above, Sema does not always wrap the call in an
+      // ExprWithCleanups.
+      if (const auto *resultExpr = cast_or_null<Expr>(s.getResultDecl())) {
+        CIRGenFunction::FullExprCleanupScope scope(cgf, resultExpr);
+        cgf.emitIgnoredExpr(resultExpr);
+      }
+      return;
+    }
+
+    // Sema does not wrap the initializer of the variable in an ExprWithCleanups
+    // either. The scopes below end the temporaries of the get_return_object()
+    // call, such as a by-value default argument, with its full-expression,
+    // before initial_suspend. Classic CodeGen keeps them alive until it has
+    // converted the variable; GCC destroys them here too.
+    //
+    // The variable is only used by the ramp function, which still converts it
+    // after the coroutine has been resumed and possibly destroyed, for example
+    // on another thread, before the suspension in the ramp function returns.
+    if (groInReturnSlot) {
+      // The variable is the return value, which the ramp function returns
+      // after that as well. Nothing converts or destroys it, so it needs
+      // neither an alloca nor the flag that tells the cleanup of an NRVO
+      // variable whether it has been returned.
+      cgf.setAddrOfLocalVar(groVar, cgf.returnValue);
+      if (cir::AllocaOp retAlloca = cgf.returnValue.getUnderlyingAllocaOp())
+        retAlloca.setCoroOutsideFrame(true);
+      CIRGenFunction::FullExprCleanupScope initScope(cgf, groVar->getInit());
+      cgf.emitAnyExprToMem(groVar->getInit(), cgf.returnValue,
+                           groVar->getType().getQualifiers(),
+                           /*isInit=*/true);
+      return;
+    }
+
+    {
+      CIRGenFunction::CapturedCleanups::CaptureScope capture(
+          groAllocaCleanups.emplace(cgf, /*active=*/true));
+      groEmission = cgf.emitAutoVarAlloca(*groVar);
+    }
+    if (cir::AllocaOp groAlloca =
+            groEmission.getAllocatedAddress().getUnderlyingAllocaOp())
+      groAlloca.setCoroOutsideFrame(true);
+    CIRGenFunction::FullExprCleanupScope initScope(cgf, groVar->getInit());
+    cgf.emitAutoVarInit(groEmission);
+  }
+
+  // Emits the gro region: converts the variable to the return value, then
+  // destroys it.
+  void emitGroConv(mlir::Location loc) {
+    assert(hasDelayedConversion() && groEmission.variable &&
+           "no delayed conversion");
+    CIRGenBuilderTy &builder = cgf.getBuilder();
+
+    // The return value is read after the coroutine frame has been destroyed
+    // when the coroutine runs to completion in the ramp function.
+    if (cir::AllocaOp retAlloca = cgf.returnValue.getUnderlyingAllocaOp())
+      retAlloca.setCoroOutsideFrame(true);
+
+    {
+      // The variable is destroyed after the conversion, also when the
+      // conversion throws.
+      CIRGenFunction::RunCleanupsScope groScope(cgf);
+      cgf.emitAutoVarCleanups(groEmission);
+
+      const Expr *retValue = s.getReturnValue();
+      CIRGenFunction::FullExprCleanupScope convScope(cgf, retValue);
+      if (cgf.fnRetTy->isReferenceType()) {
+        // Like a return statement, bind the returned reference to the result
+        // of the conversion rather than copying the object it refers to.
+        RValue ref = cgf.emitReferenceBindingToExpr(retValue);
+        builder.createStore(loc, ref.getValue(), cgf.returnValue);
+      } else {
+        cgf.emitAnyExprToMem(retValue, cgf.returnValue,
+                             retValue->getType().getQualifiers(),
+                             /*isInit=*/true);
+      }
+    }
+    groAllocaCleanups->emitIntoCleanupRegion(loc);
+    cir::YieldOp::create(builder, loc);
+  }
+};
 } // namespace
 
 RValue CIRGenFunction::emitCoroutineFrame() {
@@ -510,13 +659,12 @@ CIRGenFunction::emitCoroutineBody(const CoroutineBodyStmt &s) {
       paramReplacer.addCopy(paramMove);
     }
 
+    GetReturnObjectManager groManager(*this, s);
+
     // Builds `initial_suspend`.
     auto initialSuspendBuilder = [&]() -> mlir::LogicalResult {
       emitAutoVarDeclWithCapturedCleanups(*s.getPromiseDecl(), frameCleanups);
       setCoroIdPromise(*this, coroId, getAddrOfLocalVar(s.getPromiseDecl()));
-      // returnValue should be valid as long as the coroutine's return type
-      // is not void. The assertion could help us to reduce the check later.
-      assert(returnValue.isValid() == (bool)s.getReturnStmt());
       // Now we have the promise, initialize the GRO.
       // We need to emit `get_return_object` first. According to:
       // [dcl.fct.def.coroutine]p7
@@ -526,17 +674,7 @@ CIRGenFunction::emitCoroutineBody(const CoroutineBodyStmt &s) {
       // So we couldn't emit return value when we emit return statment,
       // otherwise the call to get_return_object wouldn't be in front
       // of initial_suspend.
-      if (returnValue.isValid()) {
-        // The call to get_return_object() is a full-expression, but Sema does
-        // not wrap it in an ExprWithCleanups when its type matches the return
-        // type. Destroy its temporaries here, so that their cleanups do not
-        // outlive initial_suspend. Classic CodeGen leaves their cleanups on
-        // the EH stack and destroys them only with the coroutine state.
-        FullExprCleanupScope groScope(*this, s.getReturnValue());
-        emitAnyExprToMem(s.getReturnValue(), returnValue,
-                         s.getReturnValue()->getType().getQualifiers(),
-                         /*isInit*/ true);
-      }
+      groManager.emitGroInit();
 
       curCoro.data->currentAwaitKind = cir::AwaitKind::Init;
       curCoro.data->exceptionHandler = s.getExceptionHandler();
@@ -724,6 +862,12 @@ CIRGenFunction::emitCoroutineBody(const CoroutineBodyStmt &s) {
           if (finalSuspendBuilder().failed())
             res = mlir::failure();
         },
+        /*groBuilder=*/
+        groManager.hasDelayedConversion()
+            ? BuilderCallbackRef([&](mlir::OpBuilder &b, mlir::Location loc) {
+                groManager.emitGroConv(openCurlyLoc);
+              })
+            : nullptr,
         /*destroyBuilder=*/
         [&](mlir::OpBuilder &b, mlir::Location loc) {
           if (destroyBuilder().failed())

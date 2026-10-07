@@ -698,10 +698,67 @@ TEST_F(CIRControlFlowTest, CoroutineOp) {
   EXPECT_FALSE(coroBranch.isRepetitiveRegion(2));
   EXPECT_FALSE(coroBranch.isRepetitiveRegion(3));
   EXPECT_FALSE(coroBranch.isRepetitiveRegion(4));
+  EXPECT_FALSE(coroBranch.isRepetitiveRegion(5));
   EXPECT_TRUE(coroBranch.hasLoop());
 
   // TODO: cir.return doesn't implement RegionBranchTerminatorOpInterface
   // verifyControlFlowInterfaceConsistency(coroOp);
+}
+
+TEST_F(CIRControlFlowTest, CoroutineOpWithGro) {
+  OwningOpRef<ModuleOp> module = parse(R"CIR(
+    cir.func coroutine @f(%arg0 : !cir.bool) {
+      cir.coroutine initialSuspend : {
+        cir.await(init, ready : {
+          cir.condition(%arg0)
+        }, suspend : {
+          cir.coro.suspend_point
+        }, resume : {
+          cir.yield
+        },)
+        cir.yield
+      }, body : {
+        cir.yield
+      }, finalSuspend : {
+        cir.yield
+      }, gro : {
+        cir.yield
+      }, destroy : {
+        cir.yield
+      }, exit : {
+        cir.return
+      }
+      cir.trap
+    }
+  )CIR");
+  auto coroOp = findFirstOp<cir::CoroutineOp>(*module);
+  ASSERT_FALSE(coroOp.getGro().empty());
+
+  // A suspension in initial_suspend or body returns to the caller through
+  // gro the first time.
+  expectSuccessors(coroOp,
+                   RegionBranchPoint(getTerminator(coroOp.getInitialSuspend())),
+                   {&coroOp.getBody(), &coroOp.getGro(), &coroOp.getExit(),
+                    &coroOp.getDestroy()});
+  expectSuccessors(coroOp, RegionBranchPoint(getTerminator(coroOp.getBody())),
+                   {&coroOp.getFinalSuspend(), &coroOp.getGro(),
+                    &coroOp.getExit(), &coroOp.getDestroy()});
+
+  // So do the completion and the suspension at the final suspend point.
+  expectSuccessors(coroOp,
+                   RegionBranchPoint(getTerminator(coroOp.getFinalSuspend())),
+                   {&coroOp.getGro(), &coroOp.getDestroy(), &coroOp.getExit()});
+
+  // gro continues to destroy after the completion, and to exit after a
+  // suspension.
+  RegionBranchTerminatorOpInterface groTerm = getTerminator(coroOp.getGro());
+  ASSERT_TRUE(groTerm);
+  expectSuccessors(coroOp, RegionBranchPoint(groTerm),
+                   {&coroOp.getDestroy(), &coroOp.getExit()});
+  expectTerminatorSuccessors(coroOp.getGro(),
+                             {&coroOp.getDestroy(), &coroOp.getExit()});
+
+  EXPECT_FALSE(asRegionBranch(coroOp).isRepetitiveRegion(3));
 }
 
 TEST_F(CIRControlFlowTest, AwaitOp) {
