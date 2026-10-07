@@ -136,6 +136,13 @@ struct ParamReferenceReplacerRAII {
 // variable. If the variable has the return type up to cv-qualifiers, Sema makes
 // `return __coro_gro;` an NRVO return instead: the variable is constructed in
 // the return slot, and nothing converts or destroys it.
+//
+// get_return_object() is called before the cir.coroutine, so its result is
+// alive when an exception reaches the unwind region of the cir.coroutine in
+// the ramp function, which destroys it there. The only exception after the
+// gro region has started to destroy the variable is one from its destructor:
+// a flag tells the unwind region that the variable must not be destroyed
+// again.
 class GetReturnObjectManager {
   CIRGenFunction &cgf;
   const CoroutineBodyStmt &s;
@@ -146,15 +153,21 @@ class GetReturnObjectManager {
   const VarDecl *groVar = nullptr;
   // Whether that variable is the return value (NRVO).
   bool groInReturnSlot = false;
+  // Whether the cir.coroutine has an unwind region.
+  bool hasUnwind;
   CIRGenFunction::AutoVarEmission groEmission =
       CIRGenFunction::AutoVarEmission::invalid();
+  // Whether the variable has been constructed and its destruction has not
+  // started yet, if the unwind region destroys it.
+  Address groActiveFlag = Address::invalid();
   // The cleanups that the alloca of the variable pushes, such as the end of its
   // lifetime, emitted into the gro region.
   std::optional<CIRGenFunction::CapturedCleanups> groAllocaCleanups;
 
 public:
-  GetReturnObjectManager(CIRGenFunction &cgf, const CoroutineBodyStmt &s)
-      : cgf(cgf), s(s) {
+  GetReturnObjectManager(CIRGenFunction &cgf, const CoroutineBodyStmt &s,
+                         bool hasUnwind)
+      : cgf(cgf), s(s), hasUnwind(hasUnwind) {
     QualType groType = s.getReturnValueInit()->getType();
     directEmit = cgf.getContext().hasSameType(groType, cgf.fnRetTy);
     // If the coroutine returns void, the result of get_return_object() is
@@ -170,7 +183,7 @@ public:
   bool hasDelayedConversion() const { return groVar && !groInReturnSlot; }
 
   // Emitted after the promise: calls get_return_object().
-  void emitGroInit() {
+  void emitGroInit(mlir::Location loc) {
     if (directEmit) {
       // returnValue should be valid as long as the coroutine's return type
       // is not void. The assertion could help us to reduce the check later.
@@ -232,8 +245,23 @@ public:
     if (cir::AllocaOp groAlloca =
             groEmission.getAllocatedAddress().getUnderlyingAllocaOp())
       groAlloca.setCoroOutsideFrame(true);
-    CIRGenFunction::FullExprCleanupScope initScope(cgf, groVar->getInit());
-    cgf.emitAutoVarInit(groEmission);
+    {
+      CIRGenFunction::FullExprCleanupScope initScope(cgf, groVar->getInit());
+      cgf.emitAutoVarInit(groEmission);
+    }
+
+    // The unwind region destroys the variable unless its destruction in the
+    // gro region has started. The flag is only used by the ramp function too.
+    if (hasUnwind && groVar->needsDestruction(cgf.getContext())) {
+      CIRGenBuilderTy &builder = cgf.getBuilder();
+      groActiveFlag = cgf.createTempAllocaWithoutCast(
+          builder.getBoolTy(), CharUnits::One(), loc, "gro.active",
+          /*arraySize=*/nullptr,
+          builder.getBestAllocaInsertPoint(cgf.getCurFunctionEntryBlock()));
+      if (cir::AllocaOp flagAlloca = groActiveFlag.getUnderlyingAllocaOp())
+        flagAlloca.setCoroOutsideFrame(true);
+      builder.createFlagStore(loc, true, groActiveFlag.getPointer());
+    }
   }
 
   // Emits the gro region: converts the variable to the return value, then
@@ -248,27 +276,77 @@ public:
     if (cir::AllocaOp retAlloca = cgf.returnValue.getUnderlyingAllocaOp())
       retAlloca.setCoroOutsideFrame(true);
 
-    {
+    const Expr *retValue = s.getReturnValue();
+    if (groActiveFlag.isValid()) {
+      // An exception from the conversion reaches the unwind region, which
+      // destroys the variable. One from the destructor must not destroy it
+      // again: clear the flag before the destruction starts.
+      {
+        CIRGenFunction::FullExprCleanupScope convScope(cgf, retValue);
+        emitConversion(loc, retValue);
+      }
+      builder.createFlagStore(loc, false, groActiveFlag.getPointer());
+      QualType::DestructionKind dtorKind =
+          groVar->needsDestruction(cgf.getContext());
+      cgf.emitDestroy(groEmission.getObjectAddress(cgf), groVar->getType(),
+                      cgf.getDestroyer(dtorKind));
+    } else {
       // The variable is destroyed after the conversion, also when the
       // conversion throws.
       CIRGenFunction::RunCleanupsScope groScope(cgf);
       cgf.emitAutoVarCleanups(groEmission);
-
-      const Expr *retValue = s.getReturnValue();
       CIRGenFunction::FullExprCleanupScope convScope(cgf, retValue);
-      if (cgf.fnRetTy->isReferenceType()) {
-        // Like a return statement, bind the returned reference to the result
-        // of the conversion rather than copying the object it refers to.
-        RValue ref = cgf.emitReferenceBindingToExpr(retValue);
-        builder.createStore(loc, ref.getValue(), cgf.returnValue);
-      } else {
-        cgf.emitAnyExprToMem(retValue, cgf.returnValue,
-                             retValue->getType().getQualifiers(),
-                             /*isInit=*/true);
-      }
+      emitConversion(loc, retValue);
     }
     groAllocaCleanups->emitIntoCleanupRegion(loc);
     cir::YieldOp::create(builder, loc);
+  }
+
+  // Emitted into the unwind region, in the ramp function: destroys the return
+  // value or the variable that holds the result of get_return_object().
+  void emitUnwindCleanup(mlir::Location loc) {
+    if (groVar) {
+      QualType::DestructionKind dtorKind =
+          groVar->needsDestruction(cgf.getContext());
+      if (!dtorKind)
+        return;
+      if (groInReturnSlot) {
+        cgf.emitDestroy(cgf.returnValue, groVar->getType(),
+                        cgf.getDestroyer(dtorKind));
+        return;
+      }
+      assert(groActiveFlag.isValid() && "destructor without an active flag");
+      CIRGenBuilderTy &builder = cgf.getBuilder();
+      mlir::Value isActive =
+          builder.createFlagLoad(loc, groActiveFlag.getPointer());
+      cir::IfOp::create(builder, loc, isActive, /*withElseRegion=*/false,
+                        [&](mlir::OpBuilder &b, mlir::Location loc) {
+                          cgf.emitDestroy(groEmission.getObjectAddress(cgf),
+                                          groVar->getType(),
+                                          cgf.getDestroyer(dtorKind));
+                          cir::YieldOp::create(b, loc);
+                        });
+      return;
+    }
+    if (!directEmit || !cgf.returnValue.isValid())
+      return;
+    if (QualType::DestructionKind dtorKind = cgf.fnRetTy.isDestructedType())
+      cgf.emitDestroy(cgf.returnValue, cgf.fnRetTy, cgf.getDestroyer(dtorKind));
+  }
+
+private:
+  // Initializes the return value from the variable, like a return statement.
+  void emitConversion(mlir::Location loc, const Expr *retValue) {
+    if (cgf.fnRetTy->isReferenceType()) {
+      // Bind the returned reference to the result of the conversion rather
+      // than copying the object it refers to.
+      RValue ref = cgf.emitReferenceBindingToExpr(retValue);
+      cgf.getBuilder().createStore(loc, ref.getValue(), cgf.returnValue);
+      return;
+    }
+    cgf.emitAnyExprToMem(retValue, cgf.returnValue,
+                         retValue->getType().getQualifiers(),
+                         /*isInit=*/true);
   }
 };
 
@@ -277,9 +355,11 @@ public:
 // object of the coroutine state, a parameter copy or the promise, or frees the
 // frame. Classic CodeGen pushes the cleanups that destroy these objects with
 // the coroutine as cleanups for both normal and exceptional exits. In CIR,
-// their normal cleanups are in the destroy region of the cir.coroutine. Until
-// the cir.coroutine starts, each exceptional one is the cleanup region of a
-// cir.cleanup.scope of kind eh around the rest of the setup instead.
+// their normal cleanups are in the destroy region of the cir.coroutine, and its
+// unwind region destroys them when an exception leaves the coroutine in the
+// ramp function. Until the cir.coroutine starts, each exceptional one is the
+// cleanup region of a cir.cleanup.scope of kind eh around the rest of the setup
+// instead.
 //
 // The scopes are not on the EH stack, where the cleanups that the destroy
 // region captures lie between them.
@@ -759,31 +839,31 @@ CIRGenFunction::emitCoroutineBody(const CoroutineBodyStmt &s) {
     bool destroyStateOnThrow =
         getLangOpts().Exceptions && !inEHSpecTerminateScope();
 
-    // Opens a scope that destroys a parameter copy or the promise, if it has
-    // to be destroyed, when the rest of the setup throws.
+    // The parameter copies and the promise that have to be destroyed, in
+    // construction order.
+    llvm::SmallVector<const VarDecl *> stateObjects;
+
+    // Records a parameter copy or the promise if it has to be destroyed, and
+    // opens a scope that destroys it when the rest of the setup throws.
     auto pushSetupCleanup = [&](const VarDecl &var,
                                 CoroSetupCleanups &cleanups) {
       QualType::DestructionKind dtorKind = var.needsDestruction(getContext());
       if (!dtorKind)
         return;
+      stateObjects.push_back(&var);
       cleanups.push(getLoc(var.getSourceRange()), [&] {
         emitDestroy(getAddrOfLocalVar(&var), var.getType(),
                     getDestroyer(dtorKind));
       });
     };
 
-    GetReturnObjectManager groManager(*this, s);
+    GetReturnObjectManager groManager(*this, s,
+                                      /*hasUnwind=*/destroyStateOnThrow);
 
     // Set up the coroutine state before the cir.coroutine, which starts with
     // the initial suspend point. An exception that escapes the setup destroys
-    // the objects constructed so far and frees the frame.
-    //
-    // FIXME: An exception that escapes the coroutine after the setup, for
-    // example one that promise.unhandled_exception() rethrows, does not end
-    // the coroutine with coro.end(unwind) yet, nor does it destroy the
-    // coroutine state when it leaves the ramp function. That needs the unwind
-    // region.
-    assert(!cir::MissingFeatures::coroUnwindRegion());
+    // the objects constructed so far and frees the frame. Afterwards, the
+    // unwind region of the cir.coroutine does.
     {
       CoroSetupCleanups setupCleanups(*this, destroyStateOnThrow);
       setupCleanups.push(openCurlyLoc, [&] {
@@ -815,7 +895,7 @@ CIRGenFunction::emitCoroutineBody(const CoroutineBodyStmt &s) {
       // So we couldn't emit return value when we emit return statment,
       // otherwise the call to get_return_object wouldn't be in front
       // of initial_suspend.
-      groManager.emitGroInit();
+      groManager.emitGroInit(openCurlyLoc);
     }
 
     // Builds `initial_suspend`.
@@ -914,6 +994,36 @@ CIRGenFunction::emitCoroutineBody(const CoroutineBodyStmt &s) {
       return mlir::success();
     };
 
+    // Builds `unwind`, like the cleanups CallCoroEnd and CallCoroDelete of
+    // classic CodeGen: coro.end(/*unwind*/ true), after which the coroutine is
+    // considered suspended at its final suspend point, then, in the ramp
+    // function only, the destruction of the return value, the promise and the
+    // parameter copies, and of the frame.
+    auto unwindBuilder = [&]() -> mlir::LogicalResult {
+      cir::ConstantOp nullHandle =
+          builder.getNullPtr(builder.getVoidPtrTy(), openCurlyLoc);
+      cir::ConstantOp isUnwind = builder.getBool(true, openCurlyLoc);
+      auto tkNone = cir::TokenNoneOp::create(builder, openCurlyLoc);
+      cir::CoroEndOp::create(builder, openCurlyLoc, nullHandle, isUnwind,
+                             tkNone);
+
+      mlir::Value inRamp = cir::CoroIsInRampOp::create(builder, openCurlyLoc,
+                                                       builder.getBoolTy());
+      mlir::LogicalResult unwindRes = mlir::success();
+      cir::IfOp::create(
+          builder, openCurlyLoc, inRamp, /*withElseRegion=*/false,
+          [&](mlir::OpBuilder &, mlir::Location loc) {
+            groManager.emitUnwindCleanup(openCurlyLoc);
+            for (const VarDecl *var : llvm::reverse(stateObjects))
+              emitDestroy(getAddrOfLocalVar(var), var->getType(),
+                          getDestroyer(var->needsDestruction(getContext())));
+            unwindRes = emitCoroDeallocate(*this, s, openCurlyLoc);
+            cir::YieldOp::create(builder, loc);
+          });
+      cir::YieldOp::create(builder, openCurlyLoc);
+      return unwindRes;
+    };
+
     // Builds `exit`: coro.end(/*unwind*/ false) followed by the actual return
     // to the caller.
     auto exitBuilder = [&]() {
@@ -973,6 +1083,13 @@ CIRGenFunction::emitCoroutineBody(const CoroutineBodyStmt &s) {
           if (destroyBuilder().failed())
             res = mlir::failure();
         },
+        /*unwindBuilder=*/
+        destroyStateOnThrow
+            ? BuilderCallbackRef([&](mlir::OpBuilder &b, mlir::Location loc) {
+                if (unwindBuilder().failed())
+                  res = mlir::failure();
+              })
+            : nullptr,
         /*exitBuilder=*/
         [&](mlir::OpBuilder &b, mlir::Location loc) {
           if (exitBuilder().failed())

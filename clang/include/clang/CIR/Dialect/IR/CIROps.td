@@ -4838,9 +4838,9 @@ def CIR_CoroutineOp : CIR_Op<"coroutine", [
 
   let summary = "Groups a coroutine's structured suspend/resume/destroy control flow";
   let description = [{
-    `cir.coroutine` is an op consisting of six regions: `initial_suspend`,
-    `body`, `final_suspend`, `gro`, `destroy`, and `exit`. The `gro` region
-    may be empty. The `unwind` region is TODO.
+    `cir.coroutine` is an op consisting of seven regions: `initial_suspend`,
+    `body`, `final_suspend`, `gro`, `destroy`, `unwind`, and `exit`. The
+    `gro` and `unwind` regions may be empty.
 
     The op holds the coroutine from its initial suspend point on. The ramp
     function sets up the coroutine state before it: it allocates the
@@ -4883,15 +4883,31 @@ def CIR_CoroutineOp : CIR_Op<"coroutine", [
       return type of the coroutine up to cv-qualifiers: the ramp function then
       initializes the return value with its result before the op.
 
-    - `unwind`: TODO.
-
     - `destroy`: destroys the coroutine state: the promise, then the
       parameter copies, then the coroutine frame (`coro.free` + `delete`).
       Reached by an explicit `destroy()` call on a handle suspended at any
       suspend point, including the initial and final ones, or by normal
       completion through `final_suspend` (and `gro`), and falls through to
       `exit`. It runs the destructors unconditionally, so an exception must
-      not reach it. Exceptional exits are not modeled yet (see `unwind`).
+      not reach it. FIXME: Unlike in classic CodeGen, an exception from one
+      of these destructors does not destroy the remaining parameter copies or
+      free the frame yet.
+
+    - `unwind`: the cleanup for an exception that leaves `initial_suspend`,
+      `body`, `final_suspend` or `gro`, for example one that
+      `promise.unhandled_exception()` rethrows. It starts with
+      `cir.coro.intrinsic.end` on the unwind path, after which the coroutine
+      is considered suspended at its final suspend point
+      ([dcl.fct.def.coroutine]p14): `done()` returns true, and destroying it
+      runs `destroy`. Only in the ramp function, whose caller never receives
+      a handle to the coroutine, it then destroys the return value (or the
+      result of `get_return_object()` that `gro` would have converted, unless
+      `gro` has started to destroy it), the promise and the parameter copies,
+      and frees the frame, guarded by `cir.coro.intrinsic.is_in_ramp`. It
+      ends with `cir.yield`, after which the exception keeps propagating. The
+      region is empty when exceptions are disabled, and when the function is
+      `noexcept`, where an escaping exception calls `std::terminate()` right
+      away.
 
     - `exit`: the shared return-to-caller path. Reached from any suspend
       point that isn't being destroyed (the coroutine is just pausing),
@@ -4912,6 +4928,11 @@ def CIR_CoroutineOp : CIR_Op<"coroutine", [
     `cir.coro.intrinsic.is_in_ramp` returns true, and then continues to `exit`
     after a suspension and to `destroy` after the completion of the coroutine.
 
+    If the `unwind` region is not empty, the operations that may throw in the
+    regions it covers unwind to it, after the cleanups of the scopes they
+    leave, like to the cleanup region of a `cir.cleanup.scope` of kind `eh`
+    around them.
+
     Example:
 
     ```mlir
@@ -4930,6 +4951,9 @@ def CIR_CoroutineOp : CIR_Op<"coroutine", [
     }, destroy : {
       // ~promise(), operator delete
       cir.yield
+    }, unwind : {
+      // coro.end(unwind), then ~GRO(), ~promise(), operator delete in the ramp
+      cir.yield
     }, exit : {
       // coro.end
       cir.return
@@ -4937,23 +4961,24 @@ def CIR_CoroutineOp : CIR_Op<"coroutine", [
     ```
   }];
 
-  // TODO(cir): Add EH
   let regions = (region AnyRegion:$initialSuspend,
                         AnyRegion:$body,
                         AnyRegion:$finalSuspend,
                         AnyRegion:$gro,
                         AnyRegion:$destroy,
+                        AnyRegion:$unwind,
                         AnyRegion:$exit);
 
   let skipDefaultBuilders = 1;
 
-  // The gro region is left empty if groBuilder is null.
+  // The gro and unwind regions are left empty if their builder is null.
   let builders = [
     OpBuilder<(ins "BuilderCallbackRef":$initialSuspendBuilder,
       "BuilderCallbackRef":$bodyBuilder,
       "BuilderCallbackRef":$finalSuspendBuilder,
       "BuilderCallbackRef":$groBuilder,
       "BuilderCallbackRef":$destroyBuilder,
+      "BuilderCallbackRef":$unwindBuilder,
       "BuilderCallbackRef":$exitBuilder)>
   ];
 
@@ -4963,6 +4988,7 @@ def CIR_CoroutineOp : CIR_Op<"coroutine", [
     `finalSuspend` `:` $finalSuspend `,`
     (`gro` `:` $gro^ `,`)?
     `destroy` `:` $destroy `,`
+    (`unwind` `:` $unwind^ `,`)?
     `exit` `:` $exit
     attr-dict
   }];
@@ -5463,7 +5489,8 @@ def CIR_CoroTryAwaitSuspendOp : CIR_Op<"coro.intrinsic.try_await.suspend", [
 
     The CFG flattening pass creates this operation for an `await_suspend`
     call that may throw in the body of a `cir.cleanup.scope` with an EH
-    cleanup or in the try region of a `cir.try`.
+    cleanup, in the try region of a `cir.try`, or in a region of a
+    `cir.coroutine` that its `unwind` region covers.
 
     Example:
 

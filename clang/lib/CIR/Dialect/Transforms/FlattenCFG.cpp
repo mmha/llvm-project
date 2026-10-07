@@ -884,6 +884,14 @@ static bool hasEnclosingEHRequirement(mlir::Operation *op) {
       if (cleanup && region != cleanup && loopOp.maybeGetCleanupKind().isEH() &&
           !isLifetimeMarkerOnly(*cleanup))
         return true;
+    } else if (auto coroOp = dyn_cast<cir::CoroutineOp>(parent)) {
+      // The unwind region of a coroutine is the EH cleanup of the regions
+      // before destroy.
+      if (!coroOp.getUnwind().empty() &&
+          (region == &coroOp.getInitialSuspend() ||
+           region == &coroOp.getBody() || region == &coroOp.getFinalSuspend() ||
+           region == &coroOp.getGro()))
+        return true;
     }
   }
   return false;
@@ -2409,12 +2417,28 @@ static void prepareCoroutine(cir::CoroutineOp coroOp,
 //
 // Each cir.coro.suspend_exit branches to ^gro.guard with false.
 //
+// A non-empty unwind region is the EH cleanup of the initial_suspend, body,
+// final_suspend and gro regions, like the cleanup region of a cir.cleanup.scope
+// of kind eh around them, flattened the same way: their throwing calls, throws
+// and throwing await_suspend wrapper calls unwind to it, and so do the
+// cir.resume operations of the cleanup scopes and try operations flattened
+// inside them. It is inlined after the exit region:
+//
+//   ^unwind:                           // only if something can throw
+//     %eh = cir.eh.initiate cleanup : !cir.eh_token
+//     cir.br ^unwind.cleanup(%eh : !cir.eh_token)
+//   ^unwind.cleanup(%token: !cir.eh_token):
+//     %ct = cir.begin_cleanup %token : !cir.eh_token -> !cir.cleanup_token
+//     ...                              // unwind
+//     cir.end_cleanup %ct : !cir.cleanup_token
+//     cir.resume %token : !cir.eh_token
+//
+// A throwing call in the unwind region calls std::terminate(). The unwind
+// region is dropped if nothing reaches it. Exceptions from the destroy and exit
+// regions do not reach it.
+//
 // The coroutine keyword of the function stays, so that the function is lowered
 // as a coroutine that the LLVM coroutine passes split.
-//
-// An exception that leaves the coroutine still unwinds straight to the caller.
-// It does not end the coroutine with coro.end yet, nor does it destroy the
-// coroutine state when it leaves the ramp function.
 class CIRCoroutineOpFlattening
     : public mlir::OpRewritePattern<cir::CoroutineOp> {
 public:
@@ -2429,13 +2453,13 @@ public:
 
     mlir::OpBuilder::InsertionGuard guard(rewriter);
     mlir::Location loc = coroOp.getLoc();
-    assert(!cir::MissingFeatures::coroUnwindRegion());
 
     mlir::Region &initialSuspend = coroOp.getInitialSuspend();
     mlir::Region &body = coroOp.getBody();
     mlir::Region &finalSuspend = coroOp.getFinalSuspend();
     mlir::Region &gro = coroOp.getGro();
     mlir::Region &destroy = coroOp.getDestroy();
+    mlir::Region &unwind = coroOp.getUnwind();
     mlir::Region &exit = coroOp.getExit();
     bool hasGro = !gro.empty();
 
@@ -2453,19 +2477,42 @@ public:
         collectYields(finalSuspend);
     llvm::SmallVector<cir::YieldOp> groYields = collectYields(gro);
     llvm::SmallVector<cir::YieldOp> destroyYields = collectYields(destroy);
+    llvm::SmallVector<cir::YieldOp> unwindYields = collectYields(unwind);
     llvm::SmallVector<cir::CoroSuspendExitOp> suspendExits;
     coroOp->walk([&](cir::CoroSuspendExitOp suspendExit) {
       suspendExits.push_back(suspendExit);
     });
+
+    // Collect what unwinds to the unwind region, and the throwing calls in it.
+    llvm::SmallVector<mlir::Operation *> callsToRewrite;
+    llvm::SmallVector<cir::ThrowOp> throwsToRewrite;
+    llvm::SmallVector<cir::ResumeOp> resumeOpsToChain;
+    llvm::SmallVector<cir::CallOp> unwindThrowingCalls;
+    if (!unwind.empty()) {
+      for (mlir::Region *region :
+           {&initialSuspend, &body, &finalSuspend, &gro}) {
+        collectThrowingCalls(*region, callsToRewrite);
+        collectThrows(*region, throwsToRewrite);
+        collectResumeOps(*region, resumeOpsToChain);
+      }
+      unwind.walk([&](cir::CallOp callOp) {
+        if (!callOp.getNothrow())
+          unwindThrowingCalls.push_back(callOp);
+      });
+    }
+    bool reachesUnwind = !callsToRewrite.empty() || !throwsToRewrite.empty() ||
+                         !resumeOpsToChain.empty();
 
     mlir::Block *initialSuspendEntry = &initialSuspend.front();
     mlir::Block *bodyEntry = &body.front();
     mlir::Block *finalSuspendEntry = &finalSuspend.front();
     mlir::Block *groEntry = hasGro ? &gro.front() : nullptr;
     mlir::Block *destroyEntry = &destroy.front();
+    mlir::Block *unwindEntry = reachesUnwind ? &unwind.front() : nullptr;
     mlir::Block *exitEntry = &exit.front();
 
-    // Inline the regions in order, with the blocks that guard gro around it.
+    // Inline the regions in order, with the blocks that guard gro around it,
+    // and unwind last.
     mlir::Block *currentBlock = rewriter.getInsertionBlock();
     mlir::Block *continueBlock =
         rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
@@ -2482,6 +2529,11 @@ public:
     }
     rewriter.inlineRegionBefore(destroy, continueBlock);
     rewriter.inlineRegionBefore(exit, continueBlock);
+    if (reachesUnwind)
+      rewriter.inlineRegionBefore(unwind, continueBlock);
+    else
+      for (mlir::Block &block : unwind)
+        block.dropAllDefinedValueUses();
 
     rewriter.setInsertionPointToEnd(currentBlock);
     cir::BrOp::create(rewriter, loc, initialSuspendEntry);
@@ -2492,6 +2544,11 @@ public:
       lowerTerminator(yield, finalSuspendEntry, rewriter);
     for (cir::YieldOp yield : destroyYields)
       lowerTerminator(yield, exitEntry, rewriter);
+
+    if (reachesUnwind)
+      flattenUnwind(unwindEntry, unwindYields, unwindThrowingCalls,
+                    callsToRewrite, throwsToRewrite, resumeOpsToChain,
+                    continueBlock, loc, rewriter);
 
     if (!hasGro) {
       // A completed coroutine is destroyed, a suspended one returns through
@@ -2531,6 +2588,51 @@ public:
 
     rewriter.eraseOp(coroOp);
     return mlir::success();
+  }
+
+private:
+  // Turn the inlined unwind region, which starts with `unwindEntry`, into an EH
+  // cleanup, and make the collected operations unwind to it.
+  void flattenUnwind(mlir::Block *unwindEntry,
+                     llvm::ArrayRef<cir::YieldOp> unwindYields,
+                     llvm::ArrayRef<cir::CallOp> unwindThrowingCalls,
+                     llvm::ArrayRef<mlir::Operation *> callsToRewrite,
+                     llvm::ArrayRef<cir::ThrowOp> throwsToRewrite,
+                     llvm::ArrayRef<cir::ResumeOp> resumeOpsToChain,
+                     mlir::Block *continueBlock, mlir::Location loc,
+                     mlir::PatternRewriter &rewriter) const {
+    mlir::Value ehToken = unwindEntry->addArgument(
+        cir::EhTokenType::get(rewriter.getContext()), loc);
+    rewriter.setInsertionPointToStart(unwindEntry);
+    auto beginCleanup = cir::BeginCleanupOp::create(rewriter, loc, ehToken);
+    for (cir::YieldOp yield : unwindYields) {
+      rewriter.setInsertionPoint(yield);
+      cir::EndCleanupOp::create(rewriter, loc, beginCleanup.getCleanupToken());
+      rewriter.replaceOpWithNewOp<cir::ResumeOp>(yield, ehToken);
+    }
+
+    // An exception thrown while the unwind region runs cannot propagate.
+    if (!unwindThrowingCalls.empty()) {
+      mlir::Block *terminateBlock =
+          buildTerminateUnwindBlock(loc, continueBlock, rewriter);
+      for (cir::CallOp callOp : unwindThrowingCalls)
+        replaceCallWithTryCall(callOp, terminateBlock, loc, rewriter);
+    }
+
+    if (!callsToRewrite.empty() || !throwsToRewrite.empty()) {
+      mlir::Block *unwindBlock = buildUnwindBlock(
+          unwindEntry, /*isCleanupOnly=*/true, loc, unwindEntry, rewriter);
+      for (mlir::Operation *callOp : callsToRewrite)
+        replaceWithUnwindingOp(callOp, unwindBlock, loc, rewriter);
+      for (cir::ThrowOp throwOp : throwsToRewrite)
+        replaceThrowWithTryThrow(throwOp, unwindBlock, loc, rewriter);
+    }
+
+    for (cir::ResumeOp resumeOp : resumeOpsToChain) {
+      rewriter.setInsertionPoint(resumeOp);
+      rewriter.replaceOpWithNewOp<cir::BrOp>(
+          resumeOp, mlir::ValueRange{resumeOp.getEhToken()}, unwindEntry);
+    }
   }
 };
 

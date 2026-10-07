@@ -649,3 +649,141 @@ cir.func coroutine @gro(%awaiter : !cir.ptr<!void>, %frame : !cir.ptr<!void>, %g
 // CHECK:       ^[[EXIT]]:
 // CHECK-NEXT:    cir.call @end()
 // CHECK-NEXT:    cir.return
+
+// A non-empty unwind region is the EH cleanup of initial_suspend, body,
+// final_suspend and gro. The throwing calls and await_suspend wrapper calls in
+// them unwind to it, and so do the EH cleanups of the scopes around them, by
+// branching to it with their token. A throwing call in the unwind region itself
+// terminates. The destroy and exit regions do not unwind to it.
+
+cir.func private @unwind_end()
+
+cir.func coroutine @unwind(%awaiter : !cir.ptr<!void>, %frame : !cir.ptr<!void>, %obj : !cir.ptr<!s32i>) {
+  cir.coroutine initialSuspend : {
+    cir.await(init, ready : {
+      %r = cir.call @ready() nothrow : () -> !cir.bool
+      cir.condition(%r)
+    }, suspend : {
+      %s = cir.coro.intrinsic.await.suspend.bool(%awaiter, %frame, @wrapper_bool) : (!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+      cir.condition(%s)
+    }, resume : {
+      cir.yield
+    },)
+    cir.yield
+  }, body : {
+    cir.cleanup.scope {
+      cir.call @may_throw() : () -> ()
+      cir.co_return
+    } cleanup all {
+      cir.call @dtor(%obj) nothrow : (!cir.ptr<!s32i>) -> ()
+      cir.yield
+    }
+    cir.yield
+  }, finalSuspend : {
+    cir.await(final, ready : {
+      %r = cir.call @ready() nothrow : () -> !cir.bool
+      cir.condition(%r)
+    }, suspend : {
+      cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @wrapper_void) nothrow : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+      cir.coro.suspend_point
+    }, resume : {
+      cir.yield
+    },)
+    cir.yield
+  }, destroy : {
+    cir.call @free_frame() : () -> ()
+    cir.yield
+  }, unwind : {
+    cir.call @unwind_end() nothrow : () -> ()
+    %in_ramp = cir.coro.intrinsic.is_in_ramp() : () -> !cir.bool
+    cir.if %in_ramp {
+      cir.call @free_frame() : () -> ()
+    }
+    cir.yield
+  }, exit : {
+    cir.call @end() nothrow : () -> ()
+    cir.return
+  }
+  cir.trap
+}
+
+// CHECK-LABEL: cir.func coroutine @unwind(
+// CHECK-SAME:      %[[AWAITER:.*]]: !cir.ptr<!void>, %[[FRAME:.*]]: !cir.ptr<!void>, %[[OBJ:.*]]: !cir.ptr<!s32i>)
+// CHECK-NOT:     cir.{{(coroutine|await|cleanup.scope|co_return)}}
+// CHECK:         %[[SAVE:.*]] = cir.coro.intrinsic.save
+// CHECK-NEXT:    %[[S:.*]] = cir.coro.intrinsic.try_await.suspend bool(%[[AWAITER]], %[[FRAME]], @wrapper_bool) ^[[INIT_CONT:bb[0-9]+]], ^[[UNWIND:bb[0-9]+]] : (!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+// CHECK:       ^[[INIT_CONT]]:
+// CHECK-NEXT:    cir.brcond %[[S]]
+//
+// CHECK:         cir.try_call @may_throw() ^{{bb[0-9]+}}, ^[[SCOPE_UNWIND:bb[0-9]+]]
+// CHECK:       ^[[SCOPE_UNWIND]]:
+// CHECK-NEXT:    %[[EH:.*]] = cir.eh.initiate cleanup : !cir.eh_token
+// CHECK-NEXT:    cir.br ^[[SCOPE_CLEANUP:bb[0-9]+]](%[[EH]] : !cir.eh_token)
+// CHECK:       ^[[SCOPE_CLEANUP]](%[[TOKEN:.*]]: !cir.eh_token):
+// CHECK-NEXT:    %[[CT:.*]] = cir.begin_cleanup %[[TOKEN]]
+// CHECK-NEXT:    cir.call @dtor(%[[OBJ]])
+// CHECK-NEXT:    cir.end_cleanup %[[CT]]
+// CHECK-NEXT:    cir.br ^[[UNWIND_CLEANUP:bb[0-9]+]](%[[TOKEN]] : !cir.eh_token)
+//
+// CHECK:         cir.label "coro.final"
+// CHECK:         cir.coro.intrinsic.await.suspend.void(%[[AWAITER]], %[[FRAME]], @wrapper_void) nothrow
+//
+// CHECK:         cir.label "coro.destroy"
+// CHECK-NEXT:    cir.call @free_frame() : () -> ()
+//
+// CHECK:         cir.call @end()
+// CHECK-NEXT:    cir.return
+//
+// CHECK:       ^[[UNWIND]]:
+// CHECK-NEXT:    %[[EH:.*]] = cir.eh.initiate cleanup : !cir.eh_token
+// CHECK-NEXT:    cir.br ^[[UNWIND_CLEANUP]](%[[EH]] : !cir.eh_token)
+// CHECK:       ^[[UNWIND_CLEANUP]](%[[TOKEN:.*]]: !cir.eh_token):
+// CHECK-NEXT:    %[[CT:.*]] = cir.begin_cleanup %[[TOKEN]]
+// CHECK-NEXT:    cir.call @unwind_end()
+// CHECK-NEXT:    %[[IN_RAMP:.*]] = cir.coro.intrinsic.is_in_ramp()
+// CHECK-NEXT:    cir.brcond %[[IN_RAMP]] ^[[RAMP:bb[0-9]+]], ^[[UNWIND_DONE:bb[0-9]+]]
+// CHECK:       ^[[RAMP]]:
+// CHECK-NEXT:    cir.try_call @free_frame() ^{{bb[0-9]+}}, ^[[TERMINATE:bb[0-9]+]]
+// CHECK:       ^[[UNWIND_DONE]]:
+// CHECK-NEXT:    cir.end_cleanup %[[CT]]
+// CHECK-NEXT:    cir.resume %[[TOKEN]] : !cir.eh_token
+// CHECK:       ^[[TERMINATE]]:
+// CHECK-NEXT:    %[[EH:.*]] = cir.eh.initiate : !cir.eh_token
+// CHECK-NEXT:    cir.eh.terminate %[[EH]]
+
+// The unwind region is dropped if nothing can unwind to it.
+
+cir.func coroutine @unwind_unused(%awaiter : !cir.ptr<!void>, %frame : !cir.ptr<!void>) {
+  cir.coroutine initialSuspend : {
+    cir.await(init, ready : {
+      %r = cir.call @ready() nothrow : () -> !cir.bool
+      cir.condition(%r)
+    }, suspend : {
+      cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @wrapper_void) nothrow : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+      cir.coro.suspend_point
+    }, resume : {
+      cir.yield
+    },)
+    cir.yield
+  }, body : {
+    cir.co_return
+  }, finalSuspend : {
+    cir.yield
+  }, destroy : {
+    cir.call @free_frame() : () -> ()
+    cir.yield
+  }, unwind : {
+    cir.call @unwind_end() nothrow : () -> ()
+    cir.yield
+  }, exit : {
+    cir.return
+  }
+  cir.trap
+}
+
+// CHECK-LABEL: cir.func coroutine @unwind_unused(
+// CHECK-NOT:     cir.eh.initiate
+// CHECK-NOT:     cir.call @unwind_end
+// CHECK:         cir.return
+// CHECK-NOT:     cir.call @unwind_end
+// CHECK:       }

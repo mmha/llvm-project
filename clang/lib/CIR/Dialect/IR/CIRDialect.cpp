@@ -3675,6 +3675,7 @@ void cir::CoroutineOp::build(OpBuilder &builder, OperationState &result,
                              BuilderCallbackRef finalSuspendBuilder,
                              BuilderCallbackRef groBuilder,
                              BuilderCallbackRef destroyBuilder,
+                             BuilderCallbackRef unwindBuilder,
                              BuilderCallbackRef exitBuilder) {
   {
     OpBuilder::InsertionGuard guard(builder);
@@ -3715,6 +3716,15 @@ void cir::CoroutineOp::build(OpBuilder &builder, OperationState &result,
 
   {
     OpBuilder::InsertionGuard guard(builder);
+    Region *unwindRegion = result.addRegion();
+    if (unwindBuilder) {
+      builder.createBlock(unwindRegion);
+      unwindBuilder(builder, result.location);
+    }
+  }
+
+  {
+    OpBuilder::InsertionGuard guard(builder);
     Region *exitRegion = result.addRegion();
     builder.createBlock(exitRegion);
     exitBuilder(builder, result.location);
@@ -3736,6 +3746,9 @@ void cir::CoroutineOp::getSuccessorRegions(
   // A suspension in the ramp function returns to the caller through gro, if
   // the coroutine has one. Other suspensions go straight to exit.
   bool hasGro = !getGro().empty();
+  // An exception from initial_suspend, body, final_suspend or gro reaches
+  // unwind, if the coroutine has one.
+  bool hasUnwind = !getUnwind().empty();
 
   // initial_suspend either falls into body (resumed, or never actually
   // suspended because await_ready() was true), exits directly (a plain
@@ -3748,6 +3761,8 @@ void cir::CoroutineOp::getSuccessorRegions(
       regions.emplace_back(&getGro());
     regions.emplace_back(&getExit());
     regions.emplace_back(&getDestroy());
+    if (hasUnwind)
+      regions.emplace_back(&getUnwind());
     return;
   }
 
@@ -3760,6 +3775,8 @@ void cir::CoroutineOp::getSuccessorRegions(
       regions.emplace_back(&getGro());
     regions.emplace_back(&getExit());    // any suspend_point inside body
     regions.emplace_back(&getDestroy()); // destroy() on any suspend inside body
+    if (hasUnwind)
+      regions.emplace_back(&getUnwind());
     return;
   }
 
@@ -3774,6 +3791,8 @@ void cir::CoroutineOp::getSuccessorRegions(
       regions.emplace_back(&getGro());
     regions.emplace_back(&getDestroy());
     regions.emplace_back(&getExit());
+    if (hasUnwind)
+      regions.emplace_back(&getUnwind());
     return;
   }
 
@@ -3782,16 +3801,26 @@ void cir::CoroutineOp::getSuccessorRegions(
   if (parent == &getGro()) {
     regions.emplace_back(&getDestroy());
     regions.emplace_back(&getExit());
+    if (hasUnwind)
+      regions.emplace_back(&getUnwind());
     return;
   }
 
-  // destroy falls through to exit (normal return).
-  // FIXME: The edge to the parent stands in for an exception that keeps
-  // propagating out of the op instead of going through exit's cir.return.
-  // Exceptional paths are not modeled yet (see the unwind TODO).
+  // destroy falls through to exit (normal return). The edge to the parent
+  // stands in for an exception from a destructor, which keeps propagating out
+  // of the op instead of going through exit's cir.return.
+  // FIXME: Unlike in classic CodeGen, such an exception does not destroy the
+  // remaining parameter copies or free the frame yet.
   if (parent == &getDestroy()) {
     regions.emplace_back(&getExit());
     regions.push_back(RegionSuccessor(getOperation())); // unwind out of the op
+    return;
+  }
+
+  // unwind ends in a cir.yield, after which the exception keeps propagating
+  // out of the op.
+  if (parent == &getUnwind()) {
+    regions.push_back(RegionSuccessor(getOperation()));
     return;
   }
   // exit always terminates the op there's no region it loops back into.
@@ -3812,6 +3841,7 @@ LogicalResult cir::CoroutineOp::verify() {
   mlir::Region &finalSuspend = getFinalSuspend();
   mlir::Region &gro = getGro();
   mlir::Region &destroy = getDestroy();
+  mlir::Region &unwind = getUnwind();
   mlir::Region &exit = getExit();
 
   // initial_suspend must contain exactly one 'init'-kind cir.await. An
@@ -3870,10 +3900,14 @@ LogicalResult cir::CoroutineOp::verify() {
     return emitOpError(
         "must have one or zero 'final' cir.await in 'final_suspend'");
 
-  // gro runs on the way out of the ramp function, it cannot suspend.
+  // gro runs on the way out of the ramp function, it cannot suspend. Neither
+  // can unwind, which runs while an exception propagates.
   if (gro.walk([](AwaitOp) { return mlir::WalkResult::interrupt(); })
           .wasInterrupted())
     return emitOpError("'gro' must not contain any cir.await");
+  if (unwind.walk([](AwaitOp) { return mlir::WalkResult::interrupt(); })
+          .wasInterrupted())
+    return emitOpError("'unwind' must not contain any cir.await");
 
   // Each region must end with the terminator its role requires:
   // initial_suspend/final_suspend/destroy yield back into cir.coroutine's
@@ -3903,6 +3937,11 @@ LogicalResult cir::CoroutineOp::verify() {
     return emitOpError("'destroy' region must not be empty");
   if (!isa<YieldOp>(destroy.back().back()))
     return emitOpError("'destroy' must end with cir.yield");
+
+  // unwind is optional.
+  if (!unwind.empty() &&
+      (unwind.back().empty() || !isa<YieldOp>(unwind.back().back())))
+    return emitOpError("'unwind' must end with cir.yield");
 
   if (exit.empty() || exit.back().empty())
     return emitOpError("'exit' region must not be empty");

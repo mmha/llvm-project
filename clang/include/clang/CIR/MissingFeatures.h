@@ -125,7 +125,6 @@ struct MissingFeatures {
 
   // Coroutines
   static bool coroAwaitSuspendWrapperProfileAttr() { return false; }
-  static bool coroUnwindRegion() { return false; }
 
   // Various handling of deferred processing in CIRGenModule.
   static bool cgmRelease() { return false; }

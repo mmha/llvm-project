@@ -41,7 +41,10 @@ struct Job {
 
 Job job(int n) { co_await std::suspend_always(); }
 
-// The destructor of __coro_gro is the cleanup of the conversion.
+// The destructor of __coro_gro is the cleanup of the conversion. With
+// exceptions, the unwind region destroys __coro_gro instead when the conversion
+// throws, guarded by a flag that the gro region clears before the destruction
+// starts.
 
 // CIR-LABEL: cir.func coroutine {{.*}} @_Z3jobi(
 // CIR:         %[[N:.*]] = cir.alloca "n" align(4) init coro_outside_frame : !cir.ptr<!s32i>
@@ -49,21 +52,37 @@ Job job(int n) { co_await std::suspend_always(); }
 // CIR:         %[[N_COPY:.*]] = cir.alloca "n" align(4) init : !cir.ptr<!s32i>
 // CIR:         %[[PROMISE:.*]] = cir.alloca "__promise" {{.*}} : !cir.ptr<!rec_Job3A3Apromise_type>
 // CIR:         %[[GRO:.*]] = cir.alloca "__coro_gro" align(4) init coro_outside_frame : !cir.ptr<!rec_Gro>
+// CIR-NOEH-NOT: gro.active
+// CIR-EH-NEXT: %[[GRO_ACTIVE:.*]] = cir.alloca "gro.active" align(1) coro_outside_frame : !cir.ptr<!cir.bool>
 // CIR:         cir.call @_ZN3Job12promise_type17get_return_objectEv(%[[GRO]], %[[PROMISE]])
+// CIR-EH-NEXT: %[[TRUE:.*]] = cir.const #true
+// CIR-EH-NEXT: cir.store %[[TRUE]], %[[GRO_ACTIVE]] : !cir.bool, !cir.ptr<!cir.bool>
 // CIR:         cir.coroutine initialSuspend : {
 // CIR-NEXT:      cir.call @_ZN3Job12promise_type15initial_suspendEv(%[[PROMISE]])
 // CIR:         }, finalSuspend : {
 // CIR:         }, gro : {
-// CIR-NEXT:      cir.cleanup.scope {
-// CIR-NEXT:        cir.call @_ZN3JobC1EO3Gro(%[[RETVAL]], %[[GRO]])
-// CIR-NEXT:        cir.yield
+// CIR-NOEH-NEXT: cir.cleanup.scope {
+// CIR-NOEH-NEXT:   cir.call @_ZN3JobC1EO3Gro(%[[RETVAL]], %[[GRO]])
+// CIR-NOEH-NEXT:   cir.yield
 // CIR-NOEH-NEXT: } cleanup normal {
-// CIR-EH-NEXT:   } cleanup all {
-// CIR-NEXT:        cir.call @_ZN3GroD1Ev(%[[GRO]]){{.*}}
-// CIR-NEXT:        cir.yield
-// CIR-NEXT:      }
+// CIR-NOEH-NEXT:   cir.call @_ZN3GroD1Ev(%[[GRO]]){{.*}}
+// CIR-NOEH-NEXT:   cir.yield
+// CIR-NOEH-NEXT: }
+// CIR-EH-NEXT:   cir.call @_ZN3JobC1EO3Gro(%[[RETVAL]], %[[GRO]])
+// CIR-EH-NEXT:   %[[FALSE:.*]] = cir.const #false
+// CIR-EH-NEXT:   cir.store %[[FALSE]], %[[GRO_ACTIVE]] : !cir.bool, !cir.ptr<!cir.bool>
+// CIR-EH-NEXT:   cir.call @_ZN3GroD1Ev(%[[GRO]]){{.*}}
 // CIR-NEXT:      cir.yield
 // CIR-NEXT:    }, destroy : {
+// CIR-NOEH-NOT:  unwind : {
+// CIR-EH:      }, unwind : {
+// CIR-EH:        %[[IN_RAMP:.*]] = cir.coro.intrinsic.is_in_ramp
+// CIR-EH-NEXT:   cir.if %[[IN_RAMP]] {
+// CIR-EH-NEXT:     %[[ACTIVE:.*]] = cir.load align(1) %[[GRO_ACTIVE]] : !cir.ptr<!cir.bool>, !cir.bool
+// CIR-EH-NEXT:     cir.if %[[ACTIVE]] {
+// CIR-EH-NEXT:       cir.call @_ZN3GroD1Ev(%[[GRO]]){{.*}}
+// CIR-EH-NEXT:     }
+// CIR-EH-NEXT:     cir.coro.intrinsic.free
 // CIR:         }, exit : {
 // CIR:           %[[RETVAL_INT:.*]] = cir.cast bitcast %[[RETVAL]] : !cir.ptr<!rec_Job> -> !cir.ptr<!s32i>
 // CIR-NEXT:      %[[RET:.*]] = cir.load align(4) %[[RETVAL_INT]] : !cir.ptr<!s32i>, !s32i
@@ -108,18 +127,34 @@ Job job(int n) { co_await std::suspend_always(); }
 // LLVM-NEXT:    %[[R:.*]] = load i32, ptr %[[RETVAL]]
 // LLVM-NEXT:    ret i32 %[[R]]
 
-// A conversion that throws destroys __coro_gro on the way out.
+// A conversion that throws ends the coroutine, then destroys __coro_gro and
+// frees the frame on the way out of the ramp function.
 
 // LLVM-EH-LABEL: define dso_local i32 @_Z3jobi(
 // LLVM-EH:         %[[GRO:.*]] = alloca %struct.Gro, align 4, !coro.outside.frame
+// LLVM-EH:         %[[GRO_ACTIVE:.*]] = alloca i8, align 1, !coro.outside.frame
+// LLVM-EH:         call void @_ZN3Job12promise_type17get_return_objectEv(ptr {{.*}} %[[GRO]], ptr {{.*}})
+// LLVM-EH-NEXT:    store i8 1, ptr %[[GRO_ACTIVE]]
 // LLVM-EH:         call i1 @llvm.coro.is_in_ramp()
 // LLVM-EH:         invoke void @_ZN3JobC1EO3Gro(ptr {{.*}}, ptr {{.*}} %[[GRO]])
-// LLVM-EH-NEXT:      to label %{{.*}} unwind label %[[LPAD:[0-9]+]]
+// LLVM-EH-NEXT:      to label %[[CONT:[0-9]+]] unwind label %[[LPAD:[0-9]+]]
+// LLVM-EH:       [[CONT]]:
+// LLVM-EH-NEXT:    store i8 0, ptr %[[GRO_ACTIVE]]
+// LLVM-EH-NEXT:    call void @_ZN3GroD1Ev(ptr {{.*}} %[[GRO]])
 // LLVM-EH:       [[LPAD]]:
 // LLVM-EH-NEXT:    landingpad { ptr, i32 }
 // LLVM-EH-NEXT:      cleanup
-// LLVM-EH-NOT:     load
-// LLVM-EH:         call void @_ZN3GroD1Ev(ptr {{.*}} %[[GRO]])
+// LLVM-EH:         call void @llvm.coro.end(ptr null, i1 true, token none)
+// LLVM-EH-NEXT:    %[[IN_RAMP:.*]] = call i1 @llvm.coro.is_in_ramp()
+// LLVM-EH-NEXT:    br i1 %[[IN_RAMP]], label %[[RAMP_CLEANUP:[0-9]+]], label %[[RESUME:[0-9]+]]
+// LLVM-EH:       [[RAMP_CLEANUP]]:
+// LLVM-EH-NEXT:    %[[ACTIVE:.*]] = load i8, ptr %[[GRO_ACTIVE]]
+// LLVM-EH-NEXT:    %[[ACTIVE_BOOL:.*]] = trunc i8 %[[ACTIVE]] to i1
+// LLVM-EH-NEXT:    br i1 %[[ACTIVE_BOOL]], label %[[DTOR:[0-9]+]], label %{{[0-9]+}}
+// LLVM-EH:       [[DTOR]]:
+// LLVM-EH-NEXT:    call void @_ZN3GroD1Ev(ptr {{.*}} %[[GRO]])
+// LLVM-EH:         call ptr @llvm.coro.free(
+// LLVM-EH:       [[RESUME]]:
 // LLVM-EH:         resume { ptr, i32 }
 
 // Classic CodeGen guards the destructor with a flag that is false until
@@ -143,6 +178,48 @@ Job job(int n) { co_await std::suspend_always(); }
 // OGCG:         call void @_ZN3GroD1Ev(ptr {{.*}} %__coro_gro)
 // OGCG:       after.gro.conv:
 // OGCG-NEXT:    br i1 %[[COMPLETED]], label %{{.*}}, label %coro.ret
+
+// If the destructor of __coro_gro throws, its exception reaches the unwind
+// region, which must not destroy __coro_gro again.
+
+struct ThrowingGro {
+  int token;
+  ThrowingGro(int);
+  ~ThrowingGro() noexcept(false);
+};
+
+struct ThrowingGroJob {
+  int token;
+  ThrowingGroJob(ThrowingGro &&);
+  struct promise_type {
+    ThrowingGro get_return_object() noexcept;
+    std::suspend_never initial_suspend() noexcept;
+    std::suspend_never final_suspend() noexcept;
+    void return_void() noexcept;
+    void unhandled_exception() noexcept;
+  };
+};
+
+ThrowingGroJob throwing_gro_dtor() { co_return; }
+
+// LLVM-EH-LABEL: define dso_local i32 @_Z17throwing_gro_dtorv(
+// LLVM-EH:         %[[GRO:.*]] = alloca %struct.ThrowingGro, align 4, !coro.outside.frame
+// LLVM-EH:         %[[GRO_ACTIVE:.*]] = alloca i8, align 1, !coro.outside.frame
+// LLVM-EH:         invoke void @_ZN14ThrowingGroJobC1EO11ThrowingGro(ptr {{.*}}, ptr {{.*}} %[[GRO]])
+// LLVM-EH-NEXT:      to label %[[CONT:[0-9]+]] unwind label %[[LPAD:[0-9]+]]
+// LLVM-EH:       [[CONT]]:
+// LLVM-EH-NEXT:    store i8 0, ptr %[[GRO_ACTIVE]]
+// LLVM-EH-NEXT:    invoke void @_ZN11ThrowingGroD1Ev(ptr {{.*}} %[[GRO]])
+// LLVM-EH-NEXT:      to label %{{[0-9]+}} unwind label %[[LPAD]]
+// LLVM-EH:       [[LPAD]]:
+// LLVM-EH-NEXT:    landingpad { ptr, i32 }
+// LLVM-EH-NEXT:      cleanup
+// LLVM-EH:         call void @llvm.coro.end(ptr null, i1 true, token none)
+// LLVM-EH:         %[[ACTIVE:.*]] = load i8, ptr %[[GRO_ACTIVE]]
+// LLVM-EH-NEXT:    %[[ACTIVE_BOOL:.*]] = trunc i8 %[[ACTIVE]] to i1
+// LLVM-EH-NEXT:    br i1 %[[ACTIVE_BOOL]], label %[[DTOR:[0-9]+]], label %{{[0-9]+}}
+// LLVM-EH:       [[DTOR]]:
+// LLVM-EH-NEXT:    invoke void @_ZN11ThrowingGroD1Ev(ptr {{.*}} %[[GRO]])
 
 // A get_return_object() result without a destructor, and a return value of
 // pointer type. This coroutine never suspends: it runs to completion in the
@@ -267,8 +344,7 @@ BigJob big_job() { co_return; }
 // CIR-NOT:       "__retval"
 // CIR:         %[[GRO:.*]] = cir.alloca "__coro_gro" align(4) init coro_outside_frame : !cir.ptr<!rec_Gro>
 // CIR:         }, gro : {
-// CIR-NEXT:      cir.cleanup.scope {
-// CIR-NEXT:        cir.call @_ZN6BigJobC1EO3Gro(%[[RET]], %[[GRO]])
+// CIR:           cir.call @_ZN6BigJobC1EO3Gro(%[[RET]], %[[GRO]])
 
 // LLVM-LABEL: define dso_local void @_Z7big_jobv(
 // LLVM-SAME:      ptr {{.*}} sret(%struct.BigJob) {{.*}} %[[RET:[0-9]+]])
@@ -344,12 +420,9 @@ Obj &conv_ref(ConvRefTag) { co_return; }
 // CIR:         %[[RETVAL:.*]] = cir.alloca "__retval" align(8) coro_outside_frame : !cir.ptr<!cir.ptr<!rec_Obj>>
 // CIR:         %[[GRO:.*]] = cir.alloca "__coro_gro" align(8) init coro_outside_frame : !cir.ptr<!rec_Wrapper>
 // CIR:         }, gro : {
-// CIR-NEXT:      cir.cleanup.scope {
-// CIR-NEXT:        %[[REF:.*]] = cir.call @_ZNK7WrappercvR3ObjEv(%[[GRO]])
-// CIR-NEXT:        cir.store align(8) %[[REF]], %[[RETVAL]] : !cir.ptr<!rec_Obj>, !cir.ptr<!cir.ptr<!rec_Obj>>
-// CIR-NEXT:        cir.yield
-// CIR-NEXT:      } cleanup {{.*}} {
-// CIR-NEXT:        cir.call @_ZN7WrapperD1Ev(%[[GRO]])
+// CIR:           %[[REF:.*]] = cir.call @_ZNK7WrappercvR3ObjEv(%[[GRO]])
+// CIR-NEXT:      cir.store align(8) %[[REF]], %[[RETVAL]] : !cir.ptr<!rec_Obj>, !cir.ptr<!cir.ptr<!rec_Obj>>
+// CIR:           cir.call @_ZN7WrapperD1Ev(%[[GRO]])
 
 // LLVM-LABEL: define dso_local {{.*}} ptr @_Z7int_ref9IntRefTag(
 // LLVM:         %[[RETVAL:.*]] = alloca ptr, align 8, !coro.outside.frame
@@ -364,8 +437,8 @@ Obj &conv_ref(ConvRefTag) { co_return; }
 
 // When the variable has the return type of the coroutine up to cv-qualifiers,
 // returning it is an NRVO return (GH148953): the variable is constructed in the
-// return slot, and nothing converts or destroys it. Classic CodeGen copies the
-// return value onto itself and destroys it instead.
+// return slot, and nothing converts or destroys it, except the unwind region.
+// Classic CodeGen copies the return value onto itself and destroys it instead.
 
 struct ConstTask {
   struct promise_type {
@@ -390,6 +463,10 @@ const ConstTask const_task() { co_return; }
 // CIR-NOT:       @_ZN9ConstTaskC1ERKS_
 // CIR-NOT:       @_ZN9ConstTaskD1Ev
 // CIR-NOT:       gro : {
+// CIR:         }, destroy : {
+// CIR-NOT:       @_ZN9ConstTaskD1Ev
+// CIR-EH:      }, unwind : {
+// CIR-EH:          cir.call @_ZN9ConstTaskD1Ev(%[[RET]])
 // CIR:         }, exit : {
 
 // LLVM-LABEL: define dso_local void @_Z10const_taskv(

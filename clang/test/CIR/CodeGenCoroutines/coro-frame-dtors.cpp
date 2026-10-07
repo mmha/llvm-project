@@ -15,9 +15,10 @@
 // start of the cir.coroutine's destroy region.
 //
 // With exceptions, they are also destroyed when an exception escapes the ramp
-// function while it sets up the coroutine state before the cir.coroutine: a
+// function: while it sets up the coroutine state before the cir.coroutine, a
 // cir.cleanup.scope of kind eh around the rest of the setup destroys each of
-// them, and an outermost one frees the frame.
+// them, and an outermost one frees the frame. Afterwards, the unwind region of
+// the cir.coroutine does, only in the ramp function.
 
 #include "Inputs/coroutine.h"
 
@@ -88,7 +89,18 @@ Task promise_dtor() { co_return; }
 // CIR-NEXT:      }
 // CIR-NEXT:      cir.coro.intrinsic.dead(%[[BEGIN]])
 // CIR-NEXT:      cir.yield
-// CIR-NEXT:    }, exit : {
+// CIR-NOEH-NEXT: }, exit : {
+// CIR-EH-NEXT: }, unwind : {
+// CIR-EH:        %[[IN_RAMP:.*]] = cir.coro.intrinsic.is_in_ramp
+// CIR-EH-NEXT:   cir.if %[[IN_RAMP]] {
+// CIR-EH-NEXT:     cir.call @_ZN4Task12promise_typeD1Ev(%[[PROMISE]])
+// CIR-EH-NEXT:     %[[MEM:.*]] = cir.coro.intrinsic.free
+// CIR-EH:            cir.call @_ZdlPvm(%[[MEM]],{{.*}}
+// CIR-EH-NEXT:     }
+// CIR-EH-NEXT:     cir.coro.intrinsic.dead(%[[BEGIN]])
+// CIR-EH-NEXT:   }
+// CIR-EH-NEXT:   cir.yield
+// CIR-EH-NEXT: }, exit : {
 // CIR-NOT:     cir.call @_ZN4Task12promise_typeD1Ev
 
 // LLVM-LABEL: define {{.*}} @_Z12promise_dtorv(
@@ -132,6 +144,10 @@ TrivialTask param_dtor(Dtor p) {
 // CIR:         }, destroy : {
 // CIR-NEXT:      cir.call @_ZN4DtorD1Ev(%[[P]])
 // CIR-NEXT:      cir.coro.intrinsic.free
+// CIR-NOT:       cir.call @_ZN4DtorD1Ev
+// CIR-EH:      }, unwind : {
+// CIR-EH:          cir.call @_ZN4DtorD1Ev(%[[P]])
+// CIR-EH-NEXT:     cir.coro.intrinsic.free
 // CIR-NOT:       cir.call @_ZN4DtorD1Ev
 // CIR:         }, exit : {
 // CIR-NOT:       cir.call @_ZN4DtorD1Ev
@@ -213,6 +229,13 @@ Task promise_and_params(Dtor a, int i, Dtor b) {
 // CIR-NEXT:      cir.call @_ZN4DtorD1Ev(%[[B]])
 // CIR-NEXT:      cir.call @_ZN4DtorD1Ev(%[[A]])
 // CIR-NEXT:      cir.coro.intrinsic.free
+// CIR-NOT:       cir.call {{@_ZN4DtorD1Ev|@_ZN4Task12promise_typeD1Ev}}
+// CIR-EH:      }, unwind : {
+// CIR-EH:        cir.if %{{.*}} {
+// CIR-EH-NEXT:     cir.call @_ZN4Task12promise_typeD1Ev(%[[PROMISE]])
+// CIR-EH-NEXT:     cir.call @_ZN4DtorD1Ev(%[[B]])
+// CIR-EH-NEXT:     cir.call @_ZN4DtorD1Ev(%[[A]])
+// CIR-EH-NEXT:     cir.coro.intrinsic.free
 // CIR-NOT:       cir.call {{@_ZN4DtorD1Ev|@_ZN4Task12promise_typeD1Ev}}
 // CIR:         }, exit : {
 // CIR-NOT:     cir.call {{@_ZN4DtorD1Ev|@_ZN4Task12promise_typeD1Ev}}

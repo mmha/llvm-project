@@ -18,7 +18,7 @@
 //
 // Like classic CodeGen, an exception that escapes does not destroy the
 // coroutine state first: there are no cleanups for the setup of the coroutine
-// state.
+// state, and the cir.coroutine has no unwind region.
 
 #include "Inputs/coroutine.h"
 
@@ -46,6 +46,7 @@ Task plain() noexcept { co_return; }
 // CIR:         cir.call @_ZN4Task12promise_type17get_return_objectEv(%[[PROMISE]])
 // CIR-NOT:     cir.cleanup.scope
 // CIR:         cir.coroutine initialSuspend : {
+// CIR-NOT:     unwind :
 // CIR:         }, exit : {
 // CIR:           cir.return
 // CIR:         }
@@ -64,10 +65,12 @@ Task plain() noexcept { co_return; }
 // LLVM-EH-NEXT:   to label %{{.*}} unwind label %[[TERMINATE:.*]]
 // LLVM:         call void @llvm.coro.end(ptr null, i1 false, token none)
 // LLVM:         ret void
+// LLVM-NOT:     @llvm.coro.end(ptr null, i1 true
 // LLVM-EH:    [[TERMINATE]]:
 // LLVM-EH-NEXT: landingpad { ptr, i32 }
 // LLVM-EH-NEXT:   catch ptr null
 // LLVM-EH:      call void @__clang_call_terminate(
+// LLVM-NOT:     @llvm.coro.end(ptr null, i1 true
 
 // The parameter copies are made in the try as well.
 
@@ -130,7 +133,7 @@ template Task maybe_noexcept<false>();
 // CIR-EH:      } catch all
 // CIR-EH-NEXT:   cir.eh.terminate
 
-// The instance that may throw has the cleanups.
+// The instance that may throw has the cleanups and the unwind region.
 
 // CIR-LABEL: cir.func {{.*}}coroutine {{.*}} @_Z14maybe_noexceptILb0EE4Taskv(
 // CIR:         %[[PROMISE:.*]] = cir.alloca "__promise" {{.*}} : !cir.ptr<!rec_Task3A3Apromise_type>
@@ -142,6 +145,12 @@ template Task maybe_noexcept<false>();
 // CIR-EH:        cir.coro.intrinsic.free
 // CIR-NOEH-NOT: cir.cleanup.scope
 // CIR:         cir.coroutine initialSuspend : {
+// CIR-NOEH-NOT:  unwind :
+// CIR-EH:      }, unwind : {
+// CIR-EH:        %[[TRUE:.*]] = cir.const #true
+// CIR-EH:        cir.coro.intrinsic.end(%{{.*}}, %[[TRUE]], %{{.*}})
+// CIR-EH:        cir.coro.intrinsic.is_in_ramp
+// CIR:         }, exit : {
 
 // LLVM-LABEL: define {{.*}} @_Z14maybe_noexceptILb1EE4Taskv(
 // LLVM:         %[[PROMISE:.*]] = alloca %"struct.Task::promise_type"

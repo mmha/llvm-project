@@ -127,3 +127,41 @@ cir.func coroutine @gro_conversion(%arg0 : !cir.bool, %n : !s32i) -> !s32i {
 // CHECK-NEXT: cir.store
 // CHECK-NEXT: cir.yield
 // CHECK-NEXT: }, destroy : {
+
+// The gro and unwind regions.
+
+cir.func coroutine @gro_and_unwind(%arg0 : !cir.bool) {
+  cir.coroutine initialSuspend : {
+    cir.await(init, ready : {
+      cir.condition(%arg0)
+    }, suspend : {
+      cir.coro.suspend_point
+    }, resume : {
+      cir.yield
+    },)
+    cir.yield
+  }, body : {
+    cir.yield
+  }, finalSuspend : {
+    cir.yield
+  }, gro : {
+    cir.yield
+  }, destroy : {
+    cir.yield
+  }, unwind : {
+    %in_ramp = cir.coro.intrinsic.is_in_ramp() : () -> !cir.bool
+    cir.yield
+  }, exit : {
+    cir.return
+  }
+  cir.trap
+}
+
+// CHECK: cir.func coroutine @gro_and_unwind
+// CHECK: }, finalSuspend : {
+// CHECK: }, gro : {
+// CHECK: }, destroy : {
+// CHECK: }, unwind : {
+// CHECK-NEXT: cir.coro.intrinsic.is_in_ramp
+// CHECK-NEXT: cir.yield
+// CHECK: }, exit : {

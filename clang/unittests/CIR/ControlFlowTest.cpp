@@ -761,6 +761,70 @@ TEST_F(CIRControlFlowTest, CoroutineOpWithGro) {
   EXPECT_FALSE(asRegionBranch(coroOp).isRepetitiveRegion(3));
 }
 
+TEST_F(CIRControlFlowTest, CoroutineOpWithUnwind) {
+  OwningOpRef<ModuleOp> module = parse(R"CIR(
+    cir.func coroutine @f(%arg0 : !cir.bool) {
+      cir.coroutine initialSuspend : {
+        cir.await(init, ready : {
+          cir.condition(%arg0)
+        }, suspend : {
+          cir.coro.suspend_point
+        }, resume : {
+          cir.yield
+        },)
+        cir.yield
+      }, body : {
+        cir.yield
+      }, finalSuspend : {
+        cir.yield
+      }, gro : {
+        cir.yield
+      }, destroy : {
+        cir.yield
+      }, unwind : {
+        cir.yield
+      }, exit : {
+        cir.return
+      }
+      cir.trap
+    }
+  )CIR");
+  auto coroOp = findFirstOp<cir::CoroutineOp>(*module);
+  ASSERT_FALSE(coroOp.getUnwind().empty());
+
+  // An exception from initial_suspend, body, final_suspend or gro reaches
+  // unwind.
+  expectSuccessors(coroOp,
+                   RegionBranchPoint(getTerminator(coroOp.getInitialSuspend())),
+                   {&coroOp.getBody(), &coroOp.getGro(), &coroOp.getExit(),
+                    &coroOp.getDestroy(), &coroOp.getUnwind()});
+  expectSuccessors(coroOp, RegionBranchPoint(getTerminator(coroOp.getBody())),
+                   {&coroOp.getFinalSuspend(), &coroOp.getGro(),
+                    &coroOp.getExit(), &coroOp.getDestroy(),
+                    &coroOp.getUnwind()});
+  expectSuccessors(coroOp,
+                   RegionBranchPoint(getTerminator(coroOp.getFinalSuspend())),
+                   {&coroOp.getGro(), &coroOp.getDestroy(), &coroOp.getExit(),
+                    &coroOp.getUnwind()});
+  expectSuccessors(
+      coroOp, RegionBranchPoint(getTerminator(coroOp.getGro())),
+      {&coroOp.getDestroy(), &coroOp.getExit(), &coroOp.getUnwind()});
+
+  // An exception from destroy does not.
+  expectSuccessors(coroOp,
+                   RegionBranchPoint(getTerminator(coroOp.getDestroy())),
+                   {&coroOp.getExit(), nullptr});
+
+  // The exception keeps propagating out of the op after unwind.
+  RegionBranchTerminatorOpInterface unwindTerm =
+      getTerminator(coroOp.getUnwind());
+  ASSERT_TRUE(unwindTerm);
+  expectSuccessors(coroOp, RegionBranchPoint(unwindTerm), {nullptr});
+  expectTerminatorSuccessors(coroOp.getUnwind(), {nullptr});
+
+  EXPECT_FALSE(asRegionBranch(coroOp).isRepetitiveRegion(5));
+}
+
 TEST_F(CIRControlFlowTest, AwaitOp) {
   OwningOpRef<ModuleOp> module = parse(R"CIR(
     cir.func coroutine @f(%arg0 : !cir.bool) {
