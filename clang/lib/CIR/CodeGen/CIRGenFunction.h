@@ -1903,6 +1903,16 @@ public:
   void emitLoopConditionVariable(const clang::VarDecl &d,
                                  CapturedCleanups &condCleanup);
 
+  /// Emit a local variable whose cleanups are captured into \p cleanups
+  /// instead of opening a cir.cleanup.scope. The caller is responsible for
+  /// emitting them into the cleanup region of the op that owns the variable.
+  /// The cleanups are not guarded by an active flag, so every path into that
+  /// region must come after \p d has been initialized. If the region also
+  /// covers the initializer, as for a loop condition variable, use
+  /// emitLoopConditionVariable instead.
+  void emitAutoVarDeclWithCapturedCleanups(const clang::VarDecl &d,
+                                           CapturedCleanups &cleanups);
+
   /// Emit the initializer for an allocated variable.  If this call is not
   /// associated with the call to emitAutoVarAlloca (as the address of the
   /// emission is not directly an alloca), the allocatedSeparately parameter can

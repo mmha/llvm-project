@@ -460,6 +460,30 @@ void CIRGenFunction::emitLoopConditionVariable(const VarDecl &d,
     initFullExprCleanupWithFlag(activeFlag);
 }
 
+// Like emitLoopConditionVariable, but without an active flag. This requires
+// that the owning op only enters the region that the captured cleanups are
+// emitted into on paths where the variable has been initialized.
+void CIRGenFunction::emitAutoVarDeclWithCapturedCleanups(
+    const VarDecl &d, CapturedCleanups &cleanups) {
+  assert(d.hasLocalStorage() && "captured cleanups for a non-local variable");
+  CIRGenFunction::VarDeclContext varDeclCtx{*this, &d};
+  CIRGenFunction::AutoVarEmission emission = [&] {
+    CapturedCleanups::CaptureScope capture(cleanups);
+    return emitAutoVarAlloca(d);
+  }();
+  // The initializer's own cleanups, such as those of its temporaries, get
+  // their normal cir.cleanup.scope handling. It must not leave cleanups on
+  // the EH stack, e.g. for a temporary that it lifetime-extends: they would
+  // not be captured.
+  [[maybe_unused]] EHScopeStack::stable_iterator initDepth =
+      ehStack.stable_begin();
+  emitAutoVarInit(emission);
+  assert(ehStack.stable_begin() == initDepth &&
+         "initializer left cleanups that cannot be captured");
+  CapturedCleanups::CaptureScope capture(cleanups);
+  emitAutoVarCleanups(emission);
+}
+
 void CIRGenFunction::emitVarDecl(const VarDecl &d) {
   // If the declaration has external storage, don't emit it now, allow it to be
   // emitted lazily on its first use.
