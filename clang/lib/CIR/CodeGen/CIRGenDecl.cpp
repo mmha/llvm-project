@@ -430,7 +430,20 @@ void CIRGenFunction::emitLoopConditionVariable(const VarDecl &d,
     builder.createFlagStore(loc, false, activeFlag.getPointer());
   }
 
+  EHScopeStack::stable_iterator initDepth = ehStack.stable_begin();
   emitAutoVarInit(emission);
+
+  // FIXME: The initializer can leave cleanups on the EH stack, e.g. for a
+  // temporary that it lifetime-extends ('while (const S &s = make())'). These
+  // must run with the variable's cleanups at the end of each iteration, but
+  // they are not captured: each owns a cir.cleanup.scope that would enclose
+  // the cir.condition. Pop them here to keep the stack balanced; the result is
+  // wrong, but the error stops the compilation.
+  if (ehStack.stable_begin() != initDepth) {
+    cgm.errorNYI(d.getSourceRange(),
+                 "loop condition variable with a lifetime-extended temporary");
+    popCleanupBlocks(initDepth);
+  }
 
   if (needsCleanup) {
     // Construction has completed, so activate the destructor cleanup.
