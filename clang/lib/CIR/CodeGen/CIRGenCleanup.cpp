@@ -694,6 +694,7 @@ void CIRGenFunction::popCleanupBlock(bool forDeactivation) {
   if (!cleanupScope) {
     assert(!scope.isNormalCleanup() && !scope.isEHCleanup() &&
            "missing cir.cleanup.scope for active cleanup");
+    scope.eraseAuxAlloca();
     ehStack.popCleanup();
     return;
   }
@@ -780,6 +781,7 @@ void CIRGenFunction::popCleanupBlock(bool forDeactivation) {
       builder.setInsertionPointToEnd(&cleanupBlock);
       cir::YieldOp::create(builder, builder.getUnknownLoc());
     }
+    scope.eraseAuxAlloca();
     ehStack.popCleanup();
     return;
   }

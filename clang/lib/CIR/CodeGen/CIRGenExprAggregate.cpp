@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "CIRGenBuilder.h"
+#include "CIRGenCleanup.h"
 #include "CIRGenConstantEmitter.h"
 #include "CIRGenFunction.h"
 #include "CIRGenValue.h"
@@ -736,20 +737,28 @@ void AggExprEmitter::emitArrayInit(Address destPtr, cir::ArrayType arrayTy,
   const CharUnits elementAlign =
       destPtr.getAlignment().alignmentOfArrayElement(elementSize);
 
-  // Destroy already-constructed elements if a later initializer throws.
-  // The cleanup is deactivated when this initialization finishes.
+  // Destroy already-constructed elements if a later initializer throws or
+  // leaves the initialization early. The cleanup is deactivated when this
+  // initialization finishes.
   QualType::DestructionKind dtorKind = elementType.isDestructedType();
   Address endOfInit = Address::invalid();
   CIRGenFunction::CleanupDeactivationScope deactivateCleanups(cgf);
 
-  if (dtorKind && cgf.getLangOpts().Exceptions) {
+  if (dtorKind) {
+    Address endOfInitAlloca = Address::invalid();
     endOfInit = cgf.createTempAlloca(cirElementPtrType, cgf.getPointerAlign(),
-                                     loc, "arrayinit.endOfInit");
+                                     loc, "arrayinit.endOfInit",
+                                     /*arraySize=*/nullptr, &endOfInitAlloca);
     builder.createStore(loc, begin, endOfInit);
 
     cgf.pushIrregularPartialArrayCleanup(begin, endOfInit, elementType,
                                          elementAlign,
                                          cgf.getDestroyer(dtorKind));
+    // The cleanup is dropped when it is deactivated if neither an exception
+    // nor an exit from the middle of the initialization can reach it. Then
+    // nothing reads endOfInit, and it is erased.
+    cast<EHCleanupScope>(*cgf.ehStack.find(cgf.ehStack.stable_begin()))
+        .setAuxAlloca(endOfInitAlloca.getPointer().getDefiningOp());
   }
 
   // The 'current element to initialize'.  The invariants on this

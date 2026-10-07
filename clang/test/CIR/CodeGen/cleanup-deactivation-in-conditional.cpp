@@ -200,3 +200,65 @@ void logical_and(bool b, bool c) {
 // OGCG-LABEL: define dso_local void @_Z11logical_andbb(
 // OGCG:       if.then:
 // OGCG-NEXT:    call void @_ZN3ObjD1Ev(
+
+// The partial array destroy of an array initialization is deactivated at the
+// end of the initialization as well.
+
+void array_ternary(bool b, bool c) {
+  Obj arr[2] = {Obj{'a'}, b ? ({
+                            if (c)
+                              return;
+                            Obj{'b'};
+                          })
+                            : Obj{'c'}};
+}
+
+// CIR-LABEL: cir.func {{.*}} @_Z13array_ternarybb(
+// CIR:         %[[ARR:.*]] = cir.alloca "arr"
+// CIR:         %[[END:.*]] = cir.alloca "arrayinit.endOfInit"
+// CIR:         %[[ACTIVE:.*]] = cir.alloca "cleanup.isactive"
+// CIR:         %[[BEGIN:.*]] = cir.cast array_to_ptrdecay %[[ARR]]
+// CIR:         cir.store %{{.*}}, %[[ACTIVE]]
+// CIR-NEXT:    cir.cleanup.scope {
+// CIR:           cir.call @_ZN3ObjC1Ec(%[[BEGIN]],
+// CIR:           %[[SECOND:.*]] = cir.ptr_stride %[[BEGIN]]
+// CIR-NEXT:      cir.store {{.*}} %[[SECOND]], %[[END]]
+// CIR:           cir.if
+// CIR:             cir.if
+// CIR-NEXT:          cir.return
+// CIR:           } else {
+// CIR:             cir.call @_ZN3ObjC1Ec(%[[SECOND]],
+// CIR-NEXT:      } loc(
+// CIR-NEXT:      %[[FALSE:.*]] = cir.const #false
+// CIR-NEXT:      cir.store %[[FALSE]], %[[ACTIVE]]
+// CIR-NEXT:      cir.yield
+// CIR-NOEH-NEXT: } cleanup normal {
+// CIR-EH-NEXT:   } cleanup all {
+// CIR-NEXT:      %[[IS_ACTIVE:.*]] = cir.load {{.*}} %[[ACTIVE]]
+// CIR-NEXT:      cir.if %[[IS_ACTIVE]] {
+// CIR-NEXT:        cir.load {{.*}} %[[END]]
+// CIR:             cir.do {
+// CIR:               cir.call @_ZN3ObjD1Ev(
+
+// LLVM-LABEL: define dso_local void @_Z13array_ternarybb(
+// LLVM:         store i8 1, ptr %[[ACTIVE:[0-9]+]]
+// LLVM:         call void @_ZN3ObjC1Ec(ptr {{.*}}, i8 noundef signext 97)
+// LLVM:         store i32 1, ptr %[[SLOT:[0-9]+]]
+// LLVM-NEXT:    br label %[[CLEANUP:[0-9]+]]
+// LLVM:         call void @_ZN3ObjC1Ec(ptr {{.*}}, i8 noundef signext 99)
+// LLVM-NEXT:    br label %[[END:[0-9]+]]
+// LLVM:       [[END]]:
+// LLVM-NEXT:    store i8 0, ptr %[[ACTIVE]]
+// LLVM-NEXT:    store i32 0, ptr %[[SLOT]]
+// LLVM-NEXT:    br label %[[CLEANUP]]
+// LLVM:       [[CLEANUP]]:
+// LLVM-NEXT:    %[[FLAG:.*]] = load i8, ptr %[[ACTIVE]]
+// LLVM-NEXT:    %[[IS_ACTIVE:.*]] = trunc i8 %[[FLAG]] to i1
+// LLVM-NEXT:    br i1 %[[IS_ACTIVE]], label %{{.*}}, label %{{.*}}
+// LLVM:         call void @_ZN3ObjD1Ev(
+
+// OGCG-LABEL: define dso_local void @_Z13array_ternarybb(
+// OGCG:       if.then:
+// OGCG-NEXT:    load ptr, ptr %arrayinit.endOfInit
+// OGCG:       arraydestroy.body:
+// OGCG:         call void @_ZN3ObjD1Ev(
