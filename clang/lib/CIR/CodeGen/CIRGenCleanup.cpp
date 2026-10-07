@@ -668,10 +668,15 @@ static void emitCleanup(CIRGenFunction &cgf, cir::CleanupScopeOp cleanupScope,
 /// through the cleanup. These exits branch through the cleanup and require
 /// the normal cleanup to be executed even when the cleanup has been
 /// deactivated.
+///
+/// In a coroutine, a cir.await is such an exit too: destroying the coroutine
+/// while it is suspended there leaves every scope around the suspend point,
+/// and so does a cir.co_return on its way to the final suspend point. The CFG
+/// flattening lowers both to gotos through the enclosing cleanups.
 static bool bodyHasBranchThroughExits(mlir::Region &bodyRegion) {
   return bodyRegion
       .walk([&](mlir::Operation *op) {
-        if (isa<cir::ReturnOp, cir::GotoOp>(op))
+        if (isa<cir::ReturnOp, cir::GotoOp, cir::AwaitOp, cir::CoReturnOp>(op))
           return mlir::WalkResult::interrupt();
         return mlir::WalkResult::advance();
       })
