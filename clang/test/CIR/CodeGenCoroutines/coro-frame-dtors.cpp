@@ -13,6 +13,11 @@
 // the promise first, before the coroutine frame is freed
 // ([dcl.fct.def.coroutine]p11 and p13). CIR emits their destructors at the
 // start of the cir.coroutine's destroy region.
+//
+// With exceptions, they are also destroyed when an exception escapes the ramp
+// function while it sets up the coroutine state before the cir.coroutine: a
+// cir.cleanup.scope of kind eh around the rest of the setup destroys each of
+// them, and an outermost one frees the frame.
 
 #include "Inputs/coroutine.h"
 
@@ -44,14 +49,31 @@ struct TrivialTask {
 
 Task promise_dtor() { co_return; }
 
-// The promise's destructor is not scoped to initial_suspend, where the promise
-// is constructed, and runs only in destroy. After the conditional deallocation,
-// coro.dead ends the lifetime of the frame.
+// The promise's destructor is not scoped around the cir.coroutine, and runs on
+// the normal path only in destroy. After the conditional deallocation,
+// coro.dead ends the lifetime of the frame, also on the exceptional path of
+// the setup.
 
 // CIR-LABEL: cir.func coroutine {{.*}} @_Z12promise_dtorv(
 // CIR:         %[[PROMISE:.*]] = cir.alloca "__promise"
 // CIR:         %[[BEGIN:.*]] = cir.coro.intrinsic.begin
-// CIR-NOT:     cir.cleanup.scope
+// CIR-NOEH-NOT: cir.cleanup.scope
+// CIR-EH-NEXT: cir.cleanup.scope {
+// CIR-EH-NEXT:   cir.cleanup.scope {
+// CIR-EH-NEXT:     cir.call @_ZN4Task12promise_type17get_return_objectEv(%[[PROMISE]])
+// CIR-EH:          cir.yield
+// CIR-EH-NEXT:   } cleanup eh {
+// CIR-EH-NEXT:     cir.call @_ZN4Task12promise_typeD1Ev(%[[PROMISE]])
+// CIR-EH-NEXT:     cir.yield
+// CIR-EH-NEXT:   }
+// CIR-EH-NEXT:   cir.yield
+// CIR-EH-NEXT: } cleanup eh {
+// CIR-EH-NEXT:   %[[MEM:.*]] = cir.coro.intrinsic.free
+// CIR-EH:          cir.call @_ZdlPvm(%[[MEM]],{{.*}}
+// CIR-EH-NEXT:   }
+// CIR-EH-NEXT:   cir.coro.intrinsic.dead(%[[BEGIN]])
+// CIR-EH-NEXT:   cir.yield
+// CIR-EH-NEXT: }
 // CIR:         cir.coroutine initialSuspend : {
 // CIR-NOT:       {{cir.cleanup.scope|cir.call @_ZN4Task12promise_typeD1Ev}}
 // CIR:           cir.await(init,
@@ -96,7 +118,15 @@ TrivialTask param_dtor(Dtor p) {
 
 // CIR-LABEL: cir.func coroutine {{.*}} @_Z10param_dtor4Dtor(
 // CIR:         %[[P:.*]] = cir.alloca "p"
-// CIR-NOT:     cir.cleanup.scope
+// CIR-NOEH-NOT: cir.cleanup.scope
+// CIR-EH:      cir.cleanup.scope {
+// CIR-EH-NEXT:   cir.copy %{{.*}} to %[[P]]
+// CIR-EH-NEXT:   cir.cleanup.scope {
+// CIR-EH-NEXT:     cir.call @_ZN11TrivialTask12promise_type17get_return_objectEv(
+// CIR-EH:        } cleanup eh {
+// CIR-EH-NEXT:     cir.call @_ZN4DtorD1Ev(%[[P]])
+// CIR-EH:      } cleanup eh {
+// CIR-EH-NEXT:   cir.coro.intrinsic.free
 // CIR:         cir.coroutine initialSuspend : {
 // CIR-NOT:       cir.call @_ZN4DtorD1Ev
 // CIR:         }, destroy : {
@@ -129,13 +159,40 @@ Task promise_and_params(Dtor a, int i, Dtor b) {
 // The promise is destroyed first, then the parameter copies in reverse order
 // of construction. A local variable of the body is still destroyed when
 // control leaves the body, before the implicit co_return calls return_void().
+// An exception from the setup only destroys what has been constructed.
 
 // CIR-LABEL: cir.func coroutine {{.*}} @_Z18promise_and_params4DtoriS_(
 // CIR-DAG:     %[[A:.*]] = cir.alloca "a"
 // CIR-DAG:     %[[B:.*]] = cir.alloca "b"
 // CIR-DAG:     %[[PROMISE:.*]] = cir.alloca "__promise"
 // CIR-NOEH-DAG: %[[LOCAL:.*]] = cir.alloca "local"
-// CIR-NOT:     cir.call {{@_ZN4DtorD1Ev|@_ZN4Task12promise_typeD1Ev}}
+// CIR-NOEH-NOT: cir.call {{@_ZN4DtorD1Ev|@_ZN4Task12promise_typeD1Ev}}
+// CIR-EH:      cir.cleanup.scope {
+// CIR-EH-NEXT:   cir.copy %{{.*}} to %[[A]]
+// CIR-EH-NEXT:   cir.cleanup.scope {
+// CIR-EH:          cir.copy %{{.*}} to %[[B]]
+// CIR-EH-NEXT:     cir.cleanup.scope {
+// CIR-EH-NEXT:       cir.cleanup.scope {
+// CIR-EH-NEXT:         cir.call @_ZN4Task12promise_type17get_return_objectEv(%[[PROMISE]])
+// CIR-EH:              cir.yield
+// CIR-EH-NEXT:       } cleanup eh {
+// CIR-EH-NEXT:         cir.call @_ZN4Task12promise_typeD1Ev(%[[PROMISE]])
+// CIR-EH-NEXT:         cir.yield
+// CIR-EH-NEXT:       }
+// CIR-EH-NEXT:       cir.yield
+// CIR-EH-NEXT:     } cleanup eh {
+// CIR-EH-NEXT:       cir.call @_ZN4DtorD1Ev(%[[B]])
+// CIR-EH-NEXT:       cir.yield
+// CIR-EH-NEXT:     }
+// CIR-EH-NEXT:     cir.yield
+// CIR-EH-NEXT:   } cleanup eh {
+// CIR-EH-NEXT:     cir.call @_ZN4DtorD1Ev(%[[A]])
+// CIR-EH-NEXT:     cir.yield
+// CIR-EH-NEXT:   }
+// CIR-EH-NEXT:   cir.yield
+// CIR-EH-NEXT: } cleanup eh {
+// CIR-EH-NEXT:   cir.coro.intrinsic.free
+// CIR-EH-NOT:    cir.call {{@_ZN4DtorD1Ev|@_ZN4Task12promise_typeD1Ev}}
 // CIR:         cir.coroutine initialSuspend : {
 // CIR-NOT:       cir.call {{@_ZN4DtorD1Ev|@_ZN4Task12promise_typeD1Ev}}
 // CIR:         }, body : {
@@ -170,8 +227,8 @@ Task promise_and_params(Dtor a, int i, Dtor b) {
 // CIR-O1:         cir.lifetime.start %[[A]]
 // CIR-O1:         cir.lifetime.start %[[I:.*]] : !cir.ptr<!s32i>
 // CIR-O1:         cir.lifetime.start %[[B]]
+// CIR-O1:         cir.lifetime.start %[[PROMISE]]
 // CIR-O1:         cir.coroutine initialSuspend : {
-// CIR-O1-NEXT:      cir.lifetime.start %[[PROMISE]]
 // CIR-O1-NOT:       cir.lifetime.end %[[PROMISE]]
 // CIR-O1-NOT:       cir.lifetime.end %[[B]]
 // CIR-O1-NOT:       cir.lifetime.end %[[A]]
@@ -221,16 +278,15 @@ PreviewTask promise_preview(Dtor d) { co_return; }
 // CIR-LABEL: cir.func coroutine {{.*}} @_Z15promise_preview4Dtor(
 // CIR:         %[[D:.*]] = cir.alloca "d"
 // CIR:         %[[PROMISE:.*]] = cir.alloca "__promise"
+// CIR:         cir.call @_ZN11PreviewTask12promise_typeC1ER4Dtor(%[[PROMISE]], %[[D]])
 // CIR:         cir.coroutine initialSuspend : {
-// CIR-NEXT:      cir.call @_ZN11PreviewTask12promise_typeC1ER4Dtor(%[[PROMISE]], %[[D]])
 // CIR:         }, destroy : {
 // CIR-NEXT:      cir.call @_ZN11PreviewTask12promise_typeD1Ev(%[[PROMISE]])
 // CIR-NEXT:      cir.call @_ZN4DtorD1Ev(%[[D]])
 // CIR-NEXT:      cir.coro.intrinsic.free
 
 // A temporary in a parameter copy's or the promise's initializer is still
-// destroyed at the end of its full-expression; it does not leak into destroy
-// and does not leave initial_suspend unterminated.
+// destroyed at the end of its full-expression; it does not leak into destroy.
 struct Tmp {
   Tmp();
   ~Tmp();
@@ -269,7 +325,7 @@ TmpTask init_temporaries(TmpMove m) { co_return; }
 // CIR-NEXT:        cir.call @_ZN3TmpD1Ev(%[[MTMP]])
 // CIR-NEXT:        cir.yield
 // CIR-NEXT:      }
-// CIR-NEXT:      cir.coroutine initialSuspend : {
+// CIR-EH-NEXT:   cir.cleanup.scope {
 // CIR-NEXT:        cir.call @_ZN3TmpC1Ev(%[[PTMP]])
 // CIR-NEXT:        cir.cleanup.scope {
 // CIR-NEXT:          cir.call @_ZN7TmpTask12promise_typeC1E3Tmp(%[[PROMISE]], %[[PTMP]])
@@ -279,6 +335,12 @@ TmpTask init_temporaries(TmpMove m) { co_return; }
 // CIR-NEXT:          cir.call @_ZN3TmpD1Ev(%[[PTMP]])
 // CIR-NEXT:          cir.yield
 // CIR-NEXT:        }
+// CIR:             cir.call @_ZN7TmpTask12promise_type17get_return_objectEv(%[[PROMISE]])
+// CIR-EH:        } cleanup eh {
+// CIR-EH-NEXT:     cir.call @_ZN7TmpTask12promise_typeD1Ev(%[[PROMISE]])
+// CIR-EH:        } cleanup eh {
+// CIR-EH-NEXT:     cir.call @_ZN7TmpMoveD1Ev(%[[M]])
+// CIR:           cir.coroutine initialSuspend : {
 // CIR-NOT:         cir.cleanup.scope
 // CIR:             cir.await(init,
 // CIR:           }, destroy : {
@@ -289,7 +351,7 @@ TmpTask init_temporaries(TmpMove m) { co_return; }
 // CIR:           }, exit : {
 
 // A temporary in the get_return_object() call is destroyed at the end of that
-// full-expression, inside initial_suspend ([class.temporary]p4). Classic
+// full-expression, before the cir.coroutine ([class.temporary]p4). Classic
 // CodeGen does not end this full-expression: it leaves the temporary's cleanup
 // on the EH stack and destroys it in coro.cleanup, with the coroutine state.
 struct GROTask {
@@ -305,15 +367,16 @@ struct GROTask {
 GROTask gro_temporary() { co_return; }
 
 // CIR-LABEL: cir.func coroutine {{.*}} @_Z13gro_temporaryv(
+// CIR:         cir.call @_ZN3TmpC1Ev
+// CIR-NEXT:    cir.cleanup.scope {
+// CIR-NEXT:      cir.call @_ZN7GROTask12promise_type17get_return_objectE3Tmp(
+// CIR-NOT:       cir.coroutine
+// CIR-NOEH:    } cleanup normal {
+// CIR-EH:      } cleanup all {
+// CIR-NEXT:      cir.call @_ZN3TmpD1Ev
+// CIR-NEXT:      cir.yield
+// CIR-NEXT:    }
 // CIR:         cir.coroutine initialSuspend : {
-// CIR:           cir.cleanup.scope {
-// CIR-NEXT:        cir.call @_ZN7GROTask12promise_type17get_return_objectE3Tmp(
-// CIR-NOT:         cir.await
-// CIR-NOEH:      } cleanup normal {
-// CIR-EH:        } cleanup all {
-// CIR-NEXT:        cir.call @_ZN3TmpD1Ev
-// CIR-NEXT:        cir.yield
-// CIR-NEXT:      }
 // CIR-NEXT:      cir.call @_ZN7GROTask12promise_type15initial_suspendEv(
 // CIR:           cir.await(init,
 // CIR:         }, destroy : {
@@ -352,15 +415,15 @@ CondGROTask cond_gro_temporary() { co_return; }
 // CIR-LABEL: cir.func coroutine {{.*}} @_Z18cond_gro_temporaryv(
 // CIR:         %[[TMP:.*]] = cir.alloca "ref.tmp0" {{.*}} : !cir.ptr<!rec_CondTmp>
 // CIR:         %[[ACTIVE:.*]] = cir.alloca "cleanup.cond"
+// CIR:         cir.cleanup.scope {
+// CIR:           cir.call @_ZN7CondTmpC1Ev(%[[TMP]])
+// CIR:           cir.call @_ZN11CondGROTask12promise_type17get_return_objectEb(
+// CIR-NOEH:    } cleanup normal {
+// CIR-EH:      } cleanup all {
+// CIR-NEXT:      %[[IS_ACTIVE:.*]] = cir.load {{.*}} %[[ACTIVE]]
+// CIR-NEXT:      cir.if %[[IS_ACTIVE]] {
+// CIR-NEXT:        cir.call @_ZN7CondTmpD1Ev(%[[TMP]])
 // CIR:         cir.coroutine initialSuspend : {
-// CIR:           cir.cleanup.scope {
-// CIR:             cir.call @_ZN7CondTmpC1Ev(%[[TMP]])
-// CIR:             cir.call @_ZN11CondGROTask12promise_type17get_return_objectEb(
-// CIR-NOEH:      } cleanup normal {
-// CIR-EH:        } cleanup all {
-// CIR-NEXT:        %[[IS_ACTIVE:.*]] = cir.load {{.*}} %[[ACTIVE]]
-// CIR-NEXT:        cir.if %[[IS_ACTIVE]] {
-// CIR-NEXT:          cir.call @_ZN7CondTmpD1Ev(%[[TMP]])
 // CIR:           cir.await(init,
 // CIR:         }, destroy : {
 // CIR-NOT:       cir.call @_ZN7CondTmpD1Ev
@@ -435,10 +498,8 @@ Task S::member(Dtor d) { co_return; }
 // CIR-NEXT:      cir.coro.intrinsic.free
 
 // An exception from get_return_object() propagates to the caller before the
-// initial suspend point; classic CodeGen destroys the parameter copy and frees
-// the frame on that path. FIXME: The unwind region is not implemented yet, so
-// with -fexceptions CIR currently destroys the copy only in destroy, which the
-// exception does not reach.
+// initial suspend point. Like classic CodeGen, CIR destroys the parameter copy
+// and frees the frame on that path (see also coro-unwind.cpp).
 struct ThrowingGROTask {
   struct promise_type {
     ThrowingGROTask get_return_object();
@@ -453,9 +514,20 @@ ThrowingGROTask eh_before_body(Dtor p) { co_return; }
 
 // CIR-LABEL: cir.func coroutine {{.*}} @_Z14eh_before_body4Dtor(
 // CIR:         %[[P:.*]] = cir.alloca "p"
-// CIR-NOT:     cir.cleanup.scope
+// CIR-NOEH-NOT: cir.cleanup.scope
+// CIR-EH:      cir.cleanup.scope {
+// CIR-EH-NEXT:   cir.copy %{{.*}} to %[[P]]
+// CIR-EH-NEXT:   cir.cleanup.scope {
+// CIR:             cir.call @_ZN15ThrowingGROTask12promise_type17get_return_objectEv(
+// CIR-EH:          cir.yield
+// CIR-EH-NEXT:   } cleanup eh {
+// CIR-EH-NEXT:     cir.call @_ZN4DtorD1Ev(%[[P]])
+// CIR-EH-NEXT:     cir.yield
+// CIR-EH-NEXT:   }
+// CIR-EH-NEXT:   cir.yield
+// CIR-EH-NEXT: } cleanup eh {
+// CIR-EH-NEXT:   cir.coro.intrinsic.free
 // CIR:         cir.coroutine initialSuspend : {
-// CIR-NEXT:      cir.call @_ZN15ThrowingGROTask12promise_type17get_return_objectEv(
 // CIR-NOT:       cir.call @_ZN4DtorD1Ev
 // CIR:         }, destroy : {
 // CIR-NEXT:      cir.call @_ZN4DtorD1Ev(%[[P]])

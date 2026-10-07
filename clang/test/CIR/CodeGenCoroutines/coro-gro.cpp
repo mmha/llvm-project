@@ -49,8 +49,8 @@ Job job(int n) { co_await std::suspend_always(); }
 // CIR:         %[[N_COPY:.*]] = cir.alloca "n" align(4) init : !cir.ptr<!s32i>
 // CIR:         %[[PROMISE:.*]] = cir.alloca "__promise" {{.*}} : !cir.ptr<!rec_Job3A3Apromise_type>
 // CIR:         %[[GRO:.*]] = cir.alloca "__coro_gro" align(4) init coro_outside_frame : !cir.ptr<!rec_Gro>
+// CIR:         cir.call @_ZN3Job12promise_type17get_return_objectEv(%[[GRO]], %[[PROMISE]])
 // CIR:         cir.coroutine initialSuspend : {
-// CIR-NEXT:      cir.call @_ZN3Job12promise_type17get_return_objectEv(%[[GRO]], %[[PROMISE]])
 // CIR-NEXT:      cir.call @_ZN3Job12promise_type15initial_suspendEv(%[[PROMISE]])
 // CIR:         }, finalSuspend : {
 // CIR:         }, gro : {
@@ -74,7 +74,7 @@ Job job(int n) { co_await std::suspend_always(); }
 // LLVM:         %[[RETVAL:.*]] = alloca %struct.Job, align 4, !coro.outside.frame ![[EMPTY]]
 // LLVM:         %[[GRO:.*]] = alloca %struct.Gro, align 4, !coro.outside.frame ![[EMPTY]]
 // LLVM:         call void @_ZN3Job12promise_type17get_return_objectEv(ptr {{.*}} %[[GRO]], ptr {{.*}})
-// LLVM-NEXT:    call void @_ZN3Job12promise_type15initial_suspendEv(
+// LLVM:         call void @_ZN3Job12promise_type15initial_suspendEv(
 // LLVM:         switch i8 %{{.*}}, label %[[INIT_SUSPENDED:[0-9]+]] [
 // LLVM:       [[INIT_SUSPENDED]]:
 // LLVM-NEXT:    br label %[[PRE_CONV:[0-9]+]]
@@ -170,8 +170,8 @@ HandleTask handle_task() { co_return; }
 // CIR-LABEL: cir.func coroutine {{.*}} @_Z11handle_taskv(
 // CIR:         %[[RETVAL:.*]] = cir.alloca "__retval" align(8) coro_outside_frame : !cir.ptr<!rec_HandleTask>
 // CIR:         %[[GRO:.*]] = cir.alloca "__coro_gro" align(8) init coro_outside_frame : !cir.ptr<!rec_Handle>
+// CIR:         cir.call @_ZN10HandleTask12promise_type17get_return_objectEv(
 // CIR:         cir.coroutine initialSuspend : {
-// CIR:           cir.call @_ZN10HandleTask12promise_type17get_return_objectEv(
 // CIR:         }, gro : {
 // CIR-NEXT:      cir.copy %[[GRO]] align(8) to %[[ARG:.*]] align(8) : !cir.ptr<!rec_Handle>
 // CIR-NOT:       cir.cleanup.scope
@@ -195,7 +195,7 @@ HandleTask handle_task() { co_return; }
 // OGCG:         call void @_ZN10HandleTaskC1E6Handle(ptr {{.*}} %retval, ptr %{{.*}})
 
 // The temporaries of the get_return_object() call end with its
-// full-expression, before initial_suspend, as in GCC. Classic CodeGen destroys
+// full-expression, before the cir.coroutine, as in GCC. Classic CodeGen destroys
 // them only after the conversion, in the ramp function.
 
 struct Tmp {
@@ -221,15 +221,15 @@ TmpJob tmp_job() { co_return; }
 // CIR:         %[[RETVAL:.*]] = cir.alloca "__retval"
 // CIR:         %[[GRO:.*]] = cir.alloca "__coro_gro"
 // CIR:         %[[TMP:.*]] = cir.alloca "agg.tmp0"
+// CIR:         cir.call @_ZN3TmpC1Ev(%[[TMP]])
+// CIR-NEXT:    cir.cleanup.scope {
+// CIR-NEXT:      cir.call @_ZN6TmpJob12promise_type17get_return_objectE3Tmp(%[[GRO]], %{{.*}}, %[[TMP]])
+// CIR-NEXT:      cir.yield
+// CIR-NEXT:    } cleanup {{.*}} {
+// CIR-NEXT:      cir.call @_ZN3TmpD1Ev(%[[TMP]])
+// CIR-NEXT:      cir.yield
+// CIR-NEXT:    }
 // CIR:         cir.coroutine initialSuspend : {
-// CIR-NEXT:      cir.call @_ZN3TmpC1Ev(%[[TMP]])
-// CIR-NEXT:      cir.cleanup.scope {
-// CIR-NEXT:        cir.call @_ZN6TmpJob12promise_type17get_return_objectE3Tmp(%[[GRO]], %{{.*}}, %[[TMP]])
-// CIR-NEXT:        cir.yield
-// CIR-NEXT:      } cleanup {{.*}} {
-// CIR-NEXT:        cir.call @_ZN3TmpD1Ev(%[[TMP]])
-// CIR-NEXT:        cir.yield
-// CIR-NEXT:      }
 // CIR-NEXT:      cir.call @_ZN6TmpJob12promise_type15initial_suspendEv(
 // CIR:         }, gro : {
 // CIR-NOT:       @_ZN3TmpD1Ev
@@ -386,8 +386,7 @@ const ConstTask const_task() { co_return; }
 // CIR-SAME:      %[[RET:[^:]*]]: !cir.ptr<!rec_ConstTask>
 // CIR-NOT:       "__coro_gro"
 // CIR-NOT:       "nrvo"
-// CIR:         cir.coroutine initialSuspend : {
-// CIR-NEXT:      cir.call @_ZN9ConstTask12promise_type17get_return_objectEv(%[[RET]], %{{.*}})
+// CIR:         cir.call @_ZN9ConstTask12promise_type17get_return_objectEv(%[[RET]], %{{.*}})
 // CIR-NOT:       @_ZN9ConstTaskC1ERKS_
 // CIR-NOT:       @_ZN9ConstTaskD1Ev
 // CIR-NOT:       gro : {
@@ -425,9 +424,9 @@ const TrivialTask const_trivial_task() { co_return; }
 
 // CIR-LABEL: cir.func coroutine {{.*}} @_Z18const_trivial_taskv(
 // CIR:         %[[RETVAL:.*]] = cir.alloca "__retval" align(4) coro_outside_frame : !cir.ptr<!rec_TrivialTask>
+// CIR:         %[[R:.*]] = cir.call @_ZN11TrivialTask12promise_type17get_return_objectEv(
+// CIR:         cir.store align(4) %{{.*}}, %[[RETVAL]]
 // CIR:         cir.coroutine initialSuspend : {
-// CIR-NEXT:      %[[R:.*]] = cir.call @_ZN11TrivialTask12promise_type17get_return_objectEv(
-// CIR:           cir.store align(4) %{{.*}}, %[[RETVAL]]
 // CIR-NOT:       gro : {
 // CIR:         }, exit : {
 
@@ -503,14 +502,14 @@ void void_coro(VoidTag) { co_return; }
 
 // CIR-LABEL: cir.func coroutine {{.*}} @_Z9void_coro7VoidTag(
 // CIR:         %[[TMP:.*]] = cir.alloca "agg.tmp.ensured" align(4) : !cir.ptr<!rec_Gro>
+// CIR:         cir.call @_ZNSt16coroutine_traitsIvJ7VoidTagEE12promise_type17get_return_objectEv(%[[TMP]], %{{.*}})
+// CIR-NEXT:    cir.cleanup.scope {
+// CIR-NEXT:      cir.yield
+// CIR-NEXT:    } cleanup {{.*}} {
+// CIR-NEXT:      cir.call @_ZN3GroD1Ev(%[[TMP]]){{.*}}
+// CIR-NEXT:      cir.yield
+// CIR-NEXT:    }
 // CIR:         cir.coroutine initialSuspend : {
-// CIR-NEXT:      cir.call @_ZNSt16coroutine_traitsIvJ7VoidTagEE12promise_type17get_return_objectEv(%[[TMP]], %{{.*}})
-// CIR-NEXT:      cir.cleanup.scope {
-// CIR-NEXT:        cir.yield
-// CIR-NEXT:      } cleanup {{.*}} {
-// CIR-NEXT:        cir.call @_ZN3GroD1Ev(%[[TMP]]){{.*}}
-// CIR-NEXT:        cir.yield
-// CIR-NEXT:      }
 // CIR-NEXT:      cir.call @_ZNSt16coroutine_traitsIvJ7VoidTagEE12promise_type15initial_suspendEv(
 // CIR:         }, finalSuspend : {
 // CIR-NOT:     gro : {

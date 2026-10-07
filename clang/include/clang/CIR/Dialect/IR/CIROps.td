@@ -4842,10 +4842,15 @@ def CIR_CoroutineOp : CIR_Op<"coroutine", [
     `body`, `final_suspend`, `gro`, `destroy`, and `exit`. The `gro` region
     may be empty. The `unwind` region is TODO.
 
-    - `initial_suspend`: the coroutine ramp/setup region. Its `cir.await` marked
-      `init` is the ramp boundary: the coroutine frame and its associated state
-      are established before this point, and crossing the await transfers
-      execution to `body`.
+    The op holds the coroutine from its initial suspend point on. The ramp
+    function sets up the coroutine state before it: it allocates the
+    coroutine frame, copies the parameters, constructs the promise and calls
+    `get_return_object()`. An exception from that setup destroys what has
+    been constructed and frees the frame through ordinary `cir.cleanup.scope`
+    operations of kind `eh` around it.
+
+    - `initial_suspend`: `co_await promise.initial_suspend()`, its `cir.await`
+      marked `init`. Crossing the await transfers execution to `body`.
 
     - `body`: the user-written coroutine body, arbitrary CFG, zero or more
       `cir.await`s at any nesting depth, terminated by `cir.co_return` or a
@@ -4865,18 +4870,18 @@ def CIR_CoroutineOp : CIR_Op<"coroutine", [
 
     - `gro`: initializes the return value of the coroutine from the result of
       `get_return_object()` when their types differ. That result is then held
-      in a variable that `initial_suspend` initializes (`__coro_gro` in the
-      AST), and the conversion is delayed until the ramp function returns to
-      the caller. This region converts the variable to the return type,
-      destroys it, and ends with `cir.yield`. It runs once, in the ramp
-      function: after the coroutine suspends in it, before `exit`, or, if the
-      coroutine runs to completion in it, after `final_suspend` and before
+      in a variable that the ramp function initializes before the op
+      (`__coro_gro` in the AST), and the conversion is delayed until the ramp
+      function returns to the caller. This region converts the variable to the
+      return type, destroys it, and ends with `cir.yield`. It runs once, in the
+      ramp function: after the coroutine suspends in it, before `exit`, or, if
+      the coroutine runs to completion in it, after `final_suspend` and before
       `destroy`, while the coroutine state still exists. Suspensions and
       completions after the coroutine has been resumed skip it, and so does
       destroying a suspended coroutine. The region is empty when the
       coroutine returns void, and when `get_return_object()` returns the
-      return type of the coroutine up to cv-qualifiers: `initial_suspend` then
-      initializes the return value with its result right away.
+      return type of the coroutine up to cv-qualifiers: the ramp function then
+      initializes the return value with its result before the op.
 
     - `unwind`: TODO.
 
@@ -4910,8 +4915,9 @@ def CIR_CoroutineOp : CIR_Op<"coroutine", [
     Example:
 
     ```mlir
+    // frame, parameter copies, promise, %gro = get_return_object()
     cir.coroutine initialSuspend : {
-      // promise, %gro = get_return_object(), co_await initial_suspend()
+      // co_await initial_suspend()
       cir.yield
     }, body : {
       cir.yield

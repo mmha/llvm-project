@@ -271,6 +271,61 @@ public:
     cir::YieldOp::create(builder, loc);
   }
 };
+
+// The cleanups for an exception that escapes the ramp function while it sets
+// up the coroutine state, before the cir.coroutine: each one destroys an
+// object of the coroutine state, a parameter copy or the promise, or frees the
+// frame. Classic CodeGen pushes the cleanups that destroy these objects with
+// the coroutine as cleanups for both normal and exceptional exits. In CIR,
+// their normal cleanups are in the destroy region of the cir.coroutine. Until
+// the cir.coroutine starts, each exceptional one is the cleanup region of a
+// cir.cleanup.scope of kind eh around the rest of the setup instead.
+//
+// The scopes are not on the EH stack, where the cleanups that the destroy
+// region captures lie between them.
+class CoroSetupCleanups {
+  CIRGenFunction &cgf;
+  bool enabled;
+  llvm::SmallVector<cir::CleanupScopeOp> scopes;
+
+public:
+  CoroSetupCleanups(CIRGenFunction &cgf, bool enabled)
+      : cgf(cgf), enabled(enabled) {}
+  ~CoroSetupCleanups() { close(); }
+
+  // Opens a scope whose cleanup `emitCleanup` emits, and continues in its body.
+  void push(mlir::Location loc, llvm::function_ref<void()> emitCleanup) {
+    if (!enabled)
+      return;
+    CIRGenBuilderTy &builder = cgf.getBuilder();
+    auto scope = cir::CleanupScopeOp::create(
+        builder, loc, cir::CleanupKind::EH,
+        /*bodyBuilder=*/[](mlir::OpBuilder &, mlir::Location) {},
+        /*cleanupBuilder=*/
+        [&](mlir::OpBuilder &b, mlir::Location loc) {
+          emitCleanup();
+          cir::YieldOp::create(b, loc);
+        });
+    builder.setInsertionPointToEnd(&scope.getBodyRegion().back());
+    scopes.push_back(scope);
+  }
+
+  // Closes the scopes, and continues after them.
+  void close() {
+    if (scopes.empty())
+      return;
+    CIRGenBuilderTy &builder = cgf.getBuilder();
+    for (cir::CleanupScopeOp scope : llvm::reverse(scopes)) {
+      mlir::Block &last = scope.getBodyRegion().back();
+      if (!last.mightHaveTerminator()) {
+        builder.setInsertionPointToEnd(&last);
+        cir::YieldOp::create(builder, scope.getLoc());
+      }
+    }
+    builder.setInsertionPointAfter(scopes.front());
+    scopes.clear();
+  }
+};
 } // namespace
 
 RValue CIRGenFunction::emitCoroutineFrame() {
@@ -525,12 +580,13 @@ static void setCoroIdPromise(CIRGenFunction &cgf, cir::CoroIdOp coroId,
   // The coro.id is created before the promise, but the promise's alloca (or,
   // for a non-default alloca address space, its address space cast) has been
   // emitted into the entry block of the current lexical scope, which is the
-  // function's: neither the cir.coroutine regions nor the exception
-  // specification's cir.try open a scope of their own. It therefore precedes
-  // the coro.id, or the op in that block containing it: in a noexcept
-  // coroutine compiled with exceptions, the coro.id is in the cir.try that
-  // calls std::terminate when an exception escapes the function. Opening a
-  // LexicalScope for the initial_suspend region would break this.
+  // function's: neither the cir.cleanup.scope operations around the setup of
+  // the coroutine state nor the exception specification's cir.try open a
+  // scope of their own. It therefore precedes the coro.id, or the op in that
+  // block containing it: in a noexcept coroutine compiled with exceptions, the
+  // coro.id is in the cir.try that calls std::terminate when an exception
+  // escapes the function. Opening a LexicalScope for the setup would break
+  // this.
   mlir::Value promisePtr = promiseAddr.getPointer();
   assert([&] {
     mlir::Operation *promiseDef = promisePtr.getDefiningOp();
@@ -546,6 +602,61 @@ static void setCoroIdPromise(CIRGenFunction &cgf, cir::CoroIdOp coroId,
   builder.setInsertionPoint(coroId);
   coroId.getPromiseMutable().assign(
       builder.createBitcast(coroId.getLoc(), promisePtr, cgf.voidPtrTy));
+}
+
+// Emits "if (coro.free(CoroId, CoroBegin)) Deallocate; coro.dead(CoroBegin);"
+// like CallCoroDelete in classic CodeGen. It frees the coroutine frame unless
+// its allocation was elided, and marks the end of its lifetime, which allows
+// heap allocation elision for a coroutine that is not destroyed explicitly.
+//
+// Like in classic CodeGen, the deallocation is emitted once for each path that
+// frees the frame. This is safe because Deallocate does not contain any
+// declarations: Sema builds a single call to a deallocation function.
+static mlir::LogicalResult emitCoroDeallocate(CIRGenFunction &cgf,
+                                              const CoroutineBodyStmt &s,
+                                              mlir::Location loc) {
+  CIRGenBuilderTy &builder = cgf.getBuilder();
+  Stmt *deallocate = s.getDeallocate();
+  cgf.curCoro.data->lastCoroFree = nullptr;
+  if (cgf.emitStmt(deallocate, /*useCurrentScope=*/true).failed()) {
+    cgf.cgm.error(deallocate->getBeginLoc(),
+                  "failed to emit coroutine deallocation expression");
+    return mlir::failure();
+  }
+
+  cir::CoroFreeOp coroFree = cgf.curCoro.data->lastCoroFree;
+  if (!coroFree) {
+    cgf.cgm.error(deallocate->getBeginLoc(),
+                  "Deallocation expression does not refer to coro.free");
+    return mlir::failure();
+  }
+
+  {
+    mlir::OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointAfter(coroFree);
+    mlir::Value isPtrNotNull = builder.createPtrIsNotNull(coroFree.getResult());
+
+    llvm::SmallVector<mlir::Operation *> opsToMove;
+    mlir::Block *block = builder.getInsertionBlock();
+    mlir::Block::iterator it(isPtrNotNull.getDefiningOp());
+
+    for (++it; it != block->end(); ++it)
+      opsToMove.push_back(&*it);
+
+    auto ifOp = cir::IfOp::create(
+        builder, cgf.getLoc(deallocate->getSourceRange()), isPtrNotNull,
+        /*withElseRegion*/ false,
+        [&](mlir::OpBuilder &builder, mlir::Location loc) {
+          cir::YieldOp::create(builder, loc);
+        });
+
+    mlir::Operation *yieldOp = ifOp.getThenRegion().back().getTerminator();
+    for (auto *op : opsToMove)
+      op->moveBefore(yieldOp);
+  }
+
+  cir::CoroDeadOp::create(builder, loc, cgf.curCoro.data->coroBegin);
+  return mlir::success();
 }
 
 mlir::LogicalResult
@@ -628,13 +739,6 @@ CIRGenFunction::emitCoroutineBody(const CoroutineBodyStmt &s) {
     // ([dcl.fct.def.coroutine]p11 and p13). A cir.cleanup.scope would end
     // their lifetime at the end of the region they are emitted in, so capture
     // their cleanups instead and emit them into the destroy region.
-    //
-    // FIXME: When the ramp throws, for example from a parameter copy
-    // constructor, the promise constructor or get_return_object(), the objects
-    // constructed so far must still be destroyed and the frame freed. That
-    // needs the unwind region. The parameter copies are constructed before the
-    // cir.coroutine, so their exceptions also need handling outside of it.
-    assert(!cir::MissingFeatures::coroUnwindRegion());
     CapturedCleanups frameCleanups(*this, /*active=*/true);
 
     // Like classic CodeGen, keep the original parameters out of the coroutine
@@ -649,22 +753,59 @@ CIRGenFunction::emitCoroutineBody(const CoroutineBodyStmt &s) {
               getAddrOfLocalVar(parm).getDefiningOp<cir::AllocaOp>())
         parmAlloca.setCoroOutsideFrame(true);
 
-    // Create parameter copies. We do it before creating a promise, since an
-    // evolution of coroutine TS may allow promise constructor to observe
-    // parameter copies.
-    for (auto *pm : paramMoves) {
-      const auto *paramMove = cast<DeclStmt>(pm);
-      emitAutoVarDeclWithCapturedCleanups(
-          cast<VarDecl>(*paramMove->getSingleDecl()), frameCleanups);
-      paramReplacer.addCopy(paramMove);
-    }
+    // An exception that escapes the ramp function destroys the coroutine state
+    // and frees the frame. Like classic CodeGen, do not bother when an
+    // escaping exception terminates the program right away.
+    bool destroyStateOnThrow =
+        getLangOpts().Exceptions && !inEHSpecTerminateScope();
+
+    // Opens a scope that destroys a parameter copy or the promise, if it has
+    // to be destroyed, when the rest of the setup throws.
+    auto pushSetupCleanup = [&](const VarDecl &var,
+                                CoroSetupCleanups &cleanups) {
+      QualType::DestructionKind dtorKind = var.needsDestruction(getContext());
+      if (!dtorKind)
+        return;
+      cleanups.push(getLoc(var.getSourceRange()), [&] {
+        emitDestroy(getAddrOfLocalVar(&var), var.getType(),
+                    getDestroyer(dtorKind));
+      });
+    };
 
     GetReturnObjectManager groManager(*this, s);
 
-    // Builds `initial_suspend`.
-    auto initialSuspendBuilder = [&]() -> mlir::LogicalResult {
+    // Set up the coroutine state before the cir.coroutine, which starts with
+    // the initial suspend point. An exception that escapes the setup destroys
+    // the objects constructed so far and frees the frame.
+    //
+    // FIXME: An exception that escapes the coroutine after the setup, for
+    // example one that promise.unhandled_exception() rethrows, does not end
+    // the coroutine with coro.end(unwind) yet, nor does it destroy the
+    // coroutine state when it leaves the ramp function. That needs the unwind
+    // region.
+    assert(!cir::MissingFeatures::coroUnwindRegion());
+    {
+      CoroSetupCleanups setupCleanups(*this, destroyStateOnThrow);
+      setupCleanups.push(openCurlyLoc, [&] {
+        if (emitCoroDeallocate(*this, s, openCurlyLoc).failed())
+          res = mlir::failure();
+      });
+
+      // Create parameter copies. We do it before creating a promise, since an
+      // evolution of coroutine TS may allow promise constructor to observe
+      // parameter copies.
+      for (auto *pm : paramMoves) {
+        const auto *paramMove = cast<DeclStmt>(pm);
+        const auto &paramCopy = cast<VarDecl>(*paramMove->getSingleDecl());
+        emitAutoVarDeclWithCapturedCleanups(paramCopy, frameCleanups);
+        paramReplacer.addCopy(paramMove);
+        pushSetupCleanup(paramCopy, setupCleanups);
+      }
+
       emitAutoVarDeclWithCapturedCleanups(*s.getPromiseDecl(), frameCleanups);
       setCoroIdPromise(*this, coroId, getAddrOfLocalVar(s.getPromiseDecl()));
+      pushSetupCleanup(*s.getPromiseDecl(), setupCleanups);
+
       // Now we have the promise, initialize the GRO.
       // We need to emit `get_return_object` first. According to:
       // [dcl.fct.def.coroutine]p7
@@ -675,7 +816,10 @@ CIRGenFunction::emitCoroutineBody(const CoroutineBodyStmt &s) {
       // otherwise the call to get_return_object wouldn't be in front
       // of initial_suspend.
       groManager.emitGroInit();
+    }
 
+    // Builds `initial_suspend`.
+    auto initialSuspendBuilder = [&]() -> mlir::LogicalResult {
       curCoro.data->currentAwaitKind = cir::AwaitKind::Init;
       curCoro.data->exceptionHandler = s.getExceptionHandler();
 
@@ -761,55 +905,11 @@ CIRGenFunction::emitCoroutineBody(const CoroutineBodyStmt &s) {
       return mlir::success();
     };
 
-    // Destroy the promise and the parameter copies, then emit
-    // "if (coro.free(CoroId, CoroBegin)) Deallocate; coro.dead(CoroBegin);"
-    // like CallCoroDelete in classic codegen.
+    // Destroy the promise and the parameter copies, then free the frame.
     auto destroyBuilder = [&]() -> mlir::LogicalResult {
       frameCleanups.emitIntoCleanupRegion(openCurlyLoc);
-
-      Stmt *deallocate = s.getDeallocate();
-      if (emitStmt(deallocate, /*useCurrentScope=*/true).failed()) {
-        cgm.error(deallocate->getBeginLoc(),
-                  "failed to emit coroutine deallocation expression");
+      if (emitCoroDeallocate(*this, s, openCurlyLoc).failed())
         return mlir::failure();
-      }
-
-      cir::CoroFreeOp coroFree = curCoro.data->lastCoroFree;
-
-      if (!coroFree) {
-        cgm.error(deallocate->getBeginLoc(),
-                  "Deallocation expression does not refer to coro.free");
-        return mlir::failure();
-      }
-      {
-        mlir::OpBuilder::InsertionGuard guard(builder);
-        builder.setInsertionPointAfter(coroFree);
-        mlir::Value isPtrNotNull =
-            builder.createPtrIsNotNull(coroFree.getResult());
-
-        llvm::SmallVector<mlir::Operation *> opsToMove;
-        mlir::Block *block = builder.getInsertionBlock();
-        mlir::Block::iterator it(isPtrNotNull.getDefiningOp());
-
-        for (++it; it != block->end(); ++it)
-          opsToMove.push_back(&*it);
-
-        auto ifOp = cir::IfOp::create(
-            builder, getLoc(deallocate->getSourceRange()), isPtrNotNull,
-            /*withElseRegion*/ false,
-            [&](mlir::OpBuilder &builder, mlir::Location loc) {
-              cir::YieldOp::create(builder, loc);
-            });
-
-        mlir::Operation *yieldOp = ifOp.getThenRegion().back().getTerminator();
-        for (auto *op : opsToMove)
-          op->moveBefore(yieldOp);
-      }
-
-      // Mark the end of the lifetime of the frame. This allows heap allocation
-      // elision for a coroutine that is not destroyed explicitly.
-      cir::CoroDeadOp::create(builder, openCurlyLoc, curCoro.data->coroBegin);
-
       cir::YieldOp::create(builder, openCurlyLoc);
       return mlir::success();
     };

@@ -32,8 +32,8 @@ Task plain() { co_return; }
 // CIR-NEXT:    %[[ALIGN:.*]] = cir.const #cir.int<16> : !u32i
 // CIR-NEXT:    %[[PROMISE_VOID:.*]] = cir.cast bitcast %[[PROMISE]] : !cir.ptr<!rec_Task3A3Apromise_type> -> !cir.ptr<!void>
 // CIR-NEXT:    %{{.*}} = cir.coro.intrinsic.id(%[[ALIGN]], %[[PROMISE_VOID]], %[[NULL]], %[[NULL]])
+// CIR:         cir.call @_ZN4Task12promise_type17get_return_objectEv(%[[PROMISE]])
 // CIR:         cir.coroutine initialSuspend : {
-// CIR:           cir.call @_ZN4Task12promise_type17get_return_objectEv(%[[PROMISE]])
 
 // LLVM-LABEL: define {{.*}} @_Z5plainv(
 // LLVM:         %[[PROMISE:.*]] = alloca %"struct.Task::promise_type"
@@ -61,9 +61,9 @@ ParamTask with_param(int n) { co_return; }
 // CIR:         %[[PROMISE:.*]] = cir.alloca "__promise" {{.*}} : !cir.ptr<!rec_ParamTask3A3Apromise_type>
 // CIR:         %[[PROMISE_VOID:.*]] = cir.cast bitcast %[[PROMISE]] : !cir.ptr<!rec_ParamTask3A3Apromise_type> -> !cir.ptr<!void>
 // CIR-NEXT:    %{{.*}} = cir.coro.intrinsic.id(%{{.*}}, %[[PROMISE_VOID]], %{{.*}}, %{{.*}})
+// CIR:         %[[N:.*]] = cir.load {{.*}} %[[N_COPY]] : !cir.ptr<!s32i>, !s32i
+// CIR-NEXT:    cir.call @_ZN9ParamTask12promise_typeC1Ei(%[[PROMISE]], %[[N]])
 // CIR:         cir.coroutine initialSuspend : {
-// CIR-NEXT:      %[[N:.*]] = cir.load {{.*}} %[[N_COPY]] : !cir.ptr<!s32i>, !s32i
-// CIR-NEXT:      cir.call @_ZN9ParamTask12promise_typeC1Ei(%[[PROMISE]], %[[N]])
 
 // LLVM-LABEL: define {{.*}} @_Z10with_parami(
 // LLVM:         %[[PROMISE:.*]] = alloca %"struct.ParamTask::promise_type"

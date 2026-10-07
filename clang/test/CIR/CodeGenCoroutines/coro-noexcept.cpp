@@ -15,6 +15,10 @@
 // function entry block, ahead of the try, and the coro.id still refers to it.
 // The cir.coroutine is flattened inside the try, and the try is flattened
 // around it.
+//
+// Like classic CodeGen, an exception that escapes does not destroy the
+// coroutine state first: there are no cleanups for the setup of the coroutine
+// state.
 
 #include "Inputs/coroutine.h"
 
@@ -38,8 +42,10 @@ Task plain() noexcept { co_return; }
 // CIR-NEXT:    %[[ALIGN:.*]] = cir.const #cir.int<16> : !u32i
 // CIR-NEXT:    %[[PROMISE_VOID:.*]] = cir.cast bitcast %[[PROMISE]] : !cir.ptr<!rec_Task3A3Apromise_type> -> !cir.ptr<!void>
 // CIR-NEXT:    %{{.*}} = cir.coro.intrinsic.id(%[[ALIGN]], %[[PROMISE_VOID]], %[[NULL]], %[[NULL]])
+// CIR-NOT:     cir.cleanup.scope
+// CIR:         cir.call @_ZN4Task12promise_type17get_return_objectEv(%[[PROMISE]])
+// CIR-NOT:     cir.cleanup.scope
 // CIR:         cir.coroutine initialSuspend : {
-// CIR:           cir.call @_ZN4Task12promise_type17get_return_objectEv(%[[PROMISE]])
 // CIR:         }, exit : {
 // CIR:           cir.return
 // CIR:         }
@@ -77,7 +83,9 @@ Task with_param(int n) noexcept { co_return; }
 // CIR-NEXT:    %{{.*}} = cir.coro.intrinsic.id(%{{.*}}, %[[PROMISE_VOID]], %{{.*}}, %{{.*}})
 // CIR:         %[[N_VAL:.*]] = cir.load {{.*}} %[[N]] : !cir.ptr<!s32i>, !s32i
 // CIR-NEXT:    cir.store {{.*}} %[[N_VAL]], %[[N_COPY]] : !s32i, !cir.ptr<!s32i>
-// CIR-NEXT:    cir.coroutine initialSuspend : {
+// CIR-NEXT:    cir.call @_ZN4Task12promise_type17get_return_objectEv(%[[PROMISE]])
+// CIR-NOT:     cir.cleanup.scope
+// CIR:         cir.coroutine initialSuspend : {
 // CIR:         }, exit : {
 // CIR-EH:      } catch all
 // CIR-EH-NEXT:   cir.eh.terminate
@@ -122,11 +130,18 @@ template Task maybe_noexcept<false>();
 // CIR-EH:      } catch all
 // CIR-EH-NEXT:   cir.eh.terminate
 
+// The instance that may throw has the cleanups.
+
 // CIR-LABEL: cir.func {{.*}}coroutine {{.*}} @_Z14maybe_noexceptILb0EE4Taskv(
 // CIR:         %[[PROMISE:.*]] = cir.alloca "__promise" {{.*}} : !cir.ptr<!rec_Task3A3Apromise_type>
 // CIR-NOT:     cir.try {
 // CIR:         %[[PROMISE_VOID:.*]] = cir.cast bitcast %[[PROMISE]] : !cir.ptr<!rec_Task3A3Apromise_type> -> !cir.ptr<!void>
 // CIR-NEXT:    %{{.*}} = cir.coro.intrinsic.id(%{{.*}}, %[[PROMISE_VOID]], %{{.*}}, %{{.*}})
+// CIR-EH:      cir.cleanup.scope {
+// CIR-EH:      } cleanup eh {
+// CIR-EH:        cir.coro.intrinsic.free
+// CIR-NOEH-NOT: cir.cleanup.scope
+// CIR:         cir.coroutine initialSuspend : {
 
 // LLVM-LABEL: define {{.*}} @_Z14maybe_noexceptILb1EE4Taskv(
 // LLVM:         %[[PROMISE:.*]] = alloca %"struct.Task::promise_type"

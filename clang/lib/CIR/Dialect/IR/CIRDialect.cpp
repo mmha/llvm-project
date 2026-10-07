@@ -3814,8 +3814,8 @@ LogicalResult cir::CoroutineOp::verify() {
   mlir::Region &destroy = getDestroy();
   mlir::Region &exit = getExit();
 
-  // initial_suspend must contain exactly one 'init'-kind cir.await an
-  // optional prelude of ordinary statements (get_return_object() and
+  // initial_suspend must contain exactly one 'init'-kind cir.await. An
+  // optional prelude of ordinary statements (the initial_suspend() call and
   // similar) is allowed before it, but no *other* await may appear.
   int initAwaitCount = 0;
   bool hasInvalidAwait = false;

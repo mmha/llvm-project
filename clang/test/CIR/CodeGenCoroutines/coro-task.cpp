@@ -78,11 +78,11 @@ VoidTask silly_task() {
 // Empty records are ignored, so calls returning one return nothing and the
 // slot takes a poison placeholder.
 
-// CIR: cir.coroutine initialSuspend : {
+// CIR: cir.call @_ZN5folly4coro4TaskIvE12promise_type17get_return_objectEv(%[[VoidPromisseAddr]]) nothrow : {{.*}} -> ()
+// CIR: %[[RetObj:.*]] = cir.const #cir.poison : ![[VoidTask]]
+// CIR: cir.store{{.*}} %[[RetObj]], %[[VoidTaskAddr]] : ![[VoidTask]]
 
-// CIR:   cir.call @_ZN5folly4coro4TaskIvE12promise_type17get_return_objectEv(%[[VoidPromisseAddr]]) nothrow : {{.*}} -> ()
-// CIR:   %[[RetObj:.*]] = cir.const #cir.poison : ![[VoidTask]]
-// CIR:   cir.store{{.*}} %[[RetObj]], %[[VoidTaskAddr]] : ![[VoidTask]]
+// CIR: cir.coroutine initialSuspend : {
 
 // OGCG: call void @llvm.lifetime.start.p0(ptr %[[VoidPromisseAddr]])
 // OGCG: call void @_ZN5folly4coro4TaskIvE12promise_type17get_return_objectEv(ptr noundef nonnull align 1 dereferenceable(1) %[[VoidPromisseAddr]])
@@ -348,10 +348,10 @@ folly::coro::Task<int> byRef(const std::string& s) {
 // CIR:     %[[LOAD:.*]] = cir.load %[[AllocaParam]] : !cir.ptr<!cir.ptr<![[StdString]]>>, !cir.ptr<![[StdString]]>
 // CIR:     cir.store {{.*}} %[[LOAD]], %[[AllocaFnUse]] : !cir.ptr<![[StdString]]>, !cir.ptr<!cir.ptr<![[StdString]]>>
 
+// CIR:    cir.call @_ZN5folly4coro4TaskIiE12promise_type17get_return_objectEv(%[[IntPromisseAddr]]) nothrow : {{.*}} -> ()
+// CIR:    %[[RetObj:.*]] = cir.const #cir.poison : ![[IntTask]]
+// CIR:    cir.store {{.*}} %[[RetObj]], %[[IntTaskAddr]] : ![[IntTask]]
 // CIR:    cir.coroutine initialSuspend : {
-// CIR:     cir.call @_ZN5folly4coro4TaskIiE12promise_type17get_return_objectEv(%[[IntPromisseAddr]]) nothrow : {{.*}} -> ()
-// CIR:     %[[RetObj:.*]] = cir.const #cir.poison : ![[IntTask]]
-// CIR:     cir.store {{.*}} %[[RetObj]], %[[IntTaskAddr]] : ![[IntTask]]
 // CIR:     cir.call @_ZN5folly4coro4TaskIiE12promise_type15initial_suspendEv(%[[IntPromisseAddr]])
 // CIR:     %[[Tmp0:.*]] = cir.const #cir.poison : ![[SuspendAlways]]
 // CIR:     cir.store{{.*}} %[[Tmp0]], %[[SuspendAlwaysAddr]]
