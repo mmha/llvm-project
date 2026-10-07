@@ -251,3 +251,83 @@ InitThrows init_await_throws() { co_return; }
 // OGCG-NEXT:      cleanup
 // OGCG:         call void @llvm.coro.end(ptr null, i1 true, token none)
 // OGCG-NEXT:    call i1 @llvm.coro.is_in_ramp()
+
+struct ThrowingDtorTask {
+  struct promise_type {
+    ~promise_type() noexcept(false);
+    ThrowingDtorTask get_return_object() noexcept;
+    std::suspend_always initial_suspend() noexcept;
+    std::suspend_always final_suspend() noexcept;
+    void return_void() noexcept;
+    void unhandled_exception() noexcept;
+  };
+};
+
+ThrowingDtorTask destroy_throws(Param p) { co_return; }
+
+// An exception from a destructor in the destroy region still destroys the
+// parameter copy and frees the frame, like in classic CodeGen: the destructors
+// and the deallocation are the cleanups of nested cir.cleanup.scope operations
+// of kind all. The exception does not reach the unwind region.
+
+// CIR-LABEL: cir.func coroutine {{.*}} @_Z14destroy_throws5Param(
+// CIR:         %[[P:.*]] = cir.alloca "p"
+// CIR:         %[[PROMISE:.*]] = cir.alloca "__promise"
+// CIR:         }, destroy : {
+// CIR-NEXT:      cir.cleanup.scope {
+// CIR-NEXT:        cir.cleanup.scope {
+// CIR-NEXT:          cir.cleanup.scope {
+// CIR-NEXT:            cir.yield
+// CIR-NEXT:          } cleanup all {
+// CIR-NEXT:            cir.call @_ZN16ThrowingDtorTask12promise_typeD1Ev(%[[PROMISE]]) :
+// CIR-NEXT:            cir.yield
+// CIR-NEXT:          }
+// CIR-NEXT:          cir.yield
+// CIR-NEXT:        } cleanup all {
+// CIR-NEXT:          cir.call @_ZN5ParamD1Ev(%[[P]])
+// CIR-NEXT:          cir.yield
+// CIR-NEXT:        }
+// CIR-NEXT:        cir.yield
+// CIR-NEXT:      } cleanup all {
+// CIR-NEXT:        %[[MEM:.*]] = cir.coro.intrinsic.free
+// CIR:             cir.call @_ZdlPvm(%[[MEM]],
+// CIR:           cir.coro.intrinsic.dead
+// CIR-NEXT:        cir.yield
+// CIR-NEXT:      }
+// CIR-NEXT:      cir.yield
+// CIR-NEXT:    }, unwind : {
+
+// LLVM-LABEL: define dso_local void @_Z14destroy_throws5Param(
+// LLVM:         %[[P:.*]] = alloca %struct.Param
+// LLVM:         %[[PROMISE:.*]] = alloca %"struct.ThrowingDtorTask::promise_type"
+// LLVM:         invoke void @_ZN16ThrowingDtorTask12promise_typeD1Ev(ptr {{.*}} %[[PROMISE]])
+// LLVM-NEXT:      to label %[[CONT:[0-9]+]] unwind label %[[LPAD:[0-9]+]]
+// LLVM:       [[CONT]]:
+// LLVM:         call void @_ZN5ParamD1Ev(ptr {{.*}} %[[P]])
+// LLVM:       [[LPAD]]:
+// LLVM-NEXT:    landingpad { ptr, i32 }
+// LLVM-NEXT:      cleanup
+// LLVM-NOT:     @llvm.coro.end
+// LLVM:         call void @_ZN5ParamD1Ev(ptr {{.*}} %[[P]])
+// LLVM-NEXT:    br label %[[EH_FREE:[0-9]+]]
+// LLVM:       [[EH_FREE]]:
+// LLVM:         %[[MEM:.*]] = call ptr @llvm.coro.free(
+// LLVM:         call void @_ZdlPvm(ptr noundef %[[MEM]],
+// LLVM:         call void @llvm.coro.dead(
+// LLVM-NOT:     @llvm.coro.end
+// LLVM:         resume { ptr, i32 }
+
+// OGCG-LABEL: define dso_local void @_Z14destroy_throws5Param(
+// OGCG:       coro.cleanup:
+// OGCG-NEXT:    invoke void @_ZN16ThrowingDtorTask12promise_typeD1Ev(ptr {{.*}} %__promise)
+// OGCG-NEXT:      to label %{{.*}} unwind label %[[LPAD:.*]]
+// OGCG:       [[LPAD]]:
+// OGCG-NEXT:    landingpad { ptr, i32 }
+// OGCG-NEXT:      cleanup
+// OGCG:         call void @_ZN5ParamD1Ev(
+// OGCG-NEXT:    br label %[[FREE:.*]]
+// OGCG:       [[FREE]]:
+// OGCG:         call ptr @llvm.coro.free(
+// OGCG:         call void @_ZdlPvm(
+// OGCG:         call void @llvm.coro.dead(
+// OGCG:         resume { ptr, i32 }

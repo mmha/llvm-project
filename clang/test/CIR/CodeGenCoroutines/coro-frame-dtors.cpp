@@ -82,13 +82,24 @@ Task promise_dtor() { co_return; }
 // CIR:         }, body : {
 // CIR-NOT:       cir.call @_ZN4Task12promise_typeD1Ev
 // CIR:         }, destroy : {
-// CIR-NEXT:      cir.call @_ZN4Task12promise_typeD1Ev(%[[PROMISE]])
+// CIR-NOEH-NEXT: cir.call @_ZN4Task12promise_typeD1Ev(%[[PROMISE]])
+// CIR-EH-NEXT:   cir.cleanup.scope {
+// CIR-EH-NEXT:     cir.cleanup.scope {
+// CIR-EH-NEXT:       cir.yield
+// CIR-EH-NEXT:     } cleanup all {
+// CIR-EH-NEXT:       cir.call @_ZN4Task12promise_typeD1Ev(%[[PROMISE]])
+// CIR-EH-NEXT:       cir.yield
+// CIR-EH-NEXT:     }
+// CIR-EH-NEXT:     cir.yield
+// CIR-EH-NEXT:   } cleanup all {
 // CIR-NEXT:      %[[MEM:.*]] = cir.coro.intrinsic.free
 // CIR-NOT:       cir.call @_ZN4Task12promise_typeD1Ev
 // CIR:           cir.call @_ZdlPvm(%[[MEM]],{{.*}}
 // CIR-NEXT:      }
 // CIR-NEXT:      cir.coro.intrinsic.dead(%[[BEGIN]])
 // CIR-NEXT:      cir.yield
+// CIR-EH-NEXT:   }
+// CIR-EH-NEXT:   cir.yield
 // CIR-NOEH-NEXT: }, exit : {
 // CIR-EH-NEXT: }, unwind : {
 // CIR-EH:        %[[IN_RAMP:.*]] = cir.coro.intrinsic.is_in_ramp
@@ -142,11 +153,13 @@ TrivialTask param_dtor(Dtor p) {
 // CIR:         cir.coroutine initialSuspend : {
 // CIR-NOT:       cir.call @_ZN4DtorD1Ev
 // CIR:         }, destroy : {
-// CIR-NEXT:      cir.call @_ZN4DtorD1Ev(%[[P]])
+// CIR-NOEH-NEXT: cir.call @_ZN4DtorD1Ev(%[[P]])
+// CIR-EH:            cir.call @_ZN4DtorD1Ev(%[[P]])
+// CIR-EH:        } cleanup all {
 // CIR-NEXT:      cir.coro.intrinsic.free
 // CIR-NOT:       cir.call @_ZN4DtorD1Ev
 // CIR-EH:      }, unwind : {
-// CIR-EH:          cir.call @_ZN4DtorD1Ev(%[[P]])
+// CIR-EH:            cir.call @_ZN4DtorD1Ev(%[[P]])
 // CIR-EH-NEXT:     cir.coro.intrinsic.free
 // CIR-NOT:       cir.call @_ZN4DtorD1Ev
 // CIR:         }, exit : {
@@ -225,9 +238,30 @@ Task promise_and_params(Dtor a, int i, Dtor b) {
 // CIR-NEXT:      cir.co_return
 // CIR-NOT:       cir.call {{@_ZN4DtorD1Ev|@_ZN4Task12promise_typeD1Ev}}
 // CIR:         }, destroy : {
-// CIR-NEXT:      cir.call @_ZN4Task12promise_typeD1Ev(%[[PROMISE]])
-// CIR-NEXT:      cir.call @_ZN4DtorD1Ev(%[[B]])
-// CIR-NEXT:      cir.call @_ZN4DtorD1Ev(%[[A]])
+// CIR-NOEH-NEXT: cir.call @_ZN4Task12promise_typeD1Ev(%[[PROMISE]])
+// CIR-NOEH-NEXT: cir.call @_ZN4DtorD1Ev(%[[B]])
+// CIR-NOEH-NEXT: cir.call @_ZN4DtorD1Ev(%[[A]])
+// CIR-EH-NEXT:   cir.cleanup.scope {
+// CIR-EH-NEXT:     cir.cleanup.scope {
+// CIR-EH-NEXT:       cir.cleanup.scope {
+// CIR-EH-NEXT:         cir.cleanup.scope {
+// CIR-EH-NEXT:           cir.yield
+// CIR-EH-NEXT:         } cleanup all {
+// CIR-EH-NEXT:           cir.call @_ZN4Task12promise_typeD1Ev(%[[PROMISE]])
+// CIR-EH-NEXT:           cir.yield
+// CIR-EH-NEXT:         }
+// CIR-EH-NEXT:         cir.yield
+// CIR-EH-NEXT:       } cleanup all {
+// CIR-EH-NEXT:         cir.call @_ZN4DtorD1Ev(%[[B]])
+// CIR-EH-NEXT:         cir.yield
+// CIR-EH-NEXT:       }
+// CIR-EH-NEXT:       cir.yield
+// CIR-EH-NEXT:     } cleanup all {
+// CIR-EH-NEXT:       cir.call @_ZN4DtorD1Ev(%[[A]])
+// CIR-EH-NEXT:       cir.yield
+// CIR-EH-NEXT:     }
+// CIR-EH-NEXT:     cir.yield
+// CIR-EH-NEXT:   } cleanup all {
 // CIR-NEXT:      cir.coro.intrinsic.free
 // CIR-NOT:       cir.call {{@_ZN4DtorD1Ev|@_ZN4Task12promise_typeD1Ev}}
 // CIR-EH:      }, unwind : {
@@ -304,8 +338,11 @@ PreviewTask promise_preview(Dtor d) { co_return; }
 // CIR:         cir.call @_ZN11PreviewTask12promise_typeC1ER4Dtor(%[[PROMISE]], %[[D]])
 // CIR:         cir.coroutine initialSuspend : {
 // CIR:         }, destroy : {
-// CIR-NEXT:      cir.call @_ZN11PreviewTask12promise_typeD1Ev(%[[PROMISE]])
-// CIR-NEXT:      cir.call @_ZN4DtorD1Ev(%[[D]])
+// CIR-NOEH-NEXT: cir.call @_ZN11PreviewTask12promise_typeD1Ev(%[[PROMISE]])
+// CIR-NOEH-NEXT: cir.call @_ZN4DtorD1Ev(%[[D]])
+// CIR-EH:            cir.call @_ZN11PreviewTask12promise_typeD1Ev(%[[PROMISE]])
+// CIR-EH:            cir.call @_ZN4DtorD1Ev(%[[D]])
+// CIR-EH:        } cleanup all {
 // CIR-NEXT:      cir.coro.intrinsic.free
 
 // A temporary in a parameter copy's or the promise's initializer is still
@@ -367,8 +404,11 @@ TmpTask init_temporaries(TmpMove m) { co_return; }
 // CIR-NOT:         cir.cleanup.scope
 // CIR:             cir.await(init,
 // CIR:           }, destroy : {
-// CIR-NEXT:        cir.call @_ZN7TmpTask12promise_typeD1Ev(%[[PROMISE]])
-// CIR-NEXT:        cir.call @_ZN7TmpMoveD1Ev(%[[M]])
+// CIR-NOEH-NEXT:   cir.call @_ZN7TmpTask12promise_typeD1Ev(%[[PROMISE]])
+// CIR-NOEH-NEXT:   cir.call @_ZN7TmpMoveD1Ev(%[[M]])
+// CIR-EH:              cir.call @_ZN7TmpTask12promise_typeD1Ev(%[[PROMISE]])
+// CIR-EH:              cir.call @_ZN7TmpMoveD1Ev(%[[M]])
+// CIR-EH:          } cleanup all {
 // CIR-NEXT:        cir.coro.intrinsic.free
 // CIR-NOT:         cir.call @_ZN3TmpD1Ev
 // CIR:           }, exit : {
@@ -473,7 +513,8 @@ TrivialTask cond_param_temporary(CondMove m) { co_return; }
 // CIR-NEXT:        cir.call @_ZN7CondTmpD1Ev(%[[TMP]])
 // CIR:         cir.coroutine initialSuspend : {
 // CIR:         }, destroy : {
-// CIR-NEXT:      cir.call @_ZN8CondMoveD1Ev(%[[M]])
+// CIR-NOEH-NEXT: cir.call @_ZN8CondMoveD1Ev(%[[M]])
+// CIR-EH:            cir.call @_ZN8CondMoveD1Ev(%[[M]])
 // CIR-NOT:       cir.call @_ZN7CondTmpD1Ev
 // CIR:         }, exit : {
 
@@ -502,8 +543,11 @@ ValueTask no_final_await(Dtor p) {
 // CIR:         }, finalSuspend : {
 // CIR-NEXT:      cir.yield
 // CIR-NEXT:    }, destroy : {
-// CIR-NEXT:      cir.call @_ZN9ValueTask12promise_typeD1Ev(%[[PROMISE]])
-// CIR-NEXT:      cir.call @_ZN4DtorD1Ev(%[[P]])
+// CIR-NOEH-NEXT: cir.call @_ZN9ValueTask12promise_typeD1Ev(%[[PROMISE]])
+// CIR-NOEH-NEXT: cir.call @_ZN4DtorD1Ev(%[[P]])
+// CIR-EH:            cir.call @_ZN9ValueTask12promise_typeD1Ev(%[[PROMISE]])
+// CIR-EH:            cir.call @_ZN4DtorD1Ev(%[[P]])
+// CIR-EH:        } cleanup all {
 // CIR-NEXT:      cir.coro.intrinsic.free
 
 // A member coroutine copies its by-value parameters, but not *this.
@@ -516,8 +560,11 @@ Task S::member(Dtor d) { co_return; }
 // CIR:         %[[D:.*]] = cir.alloca "d"
 // CIR:         %[[PROMISE:.*]] = cir.alloca "__promise"
 // CIR:         }, destroy : {
-// CIR-NEXT:      cir.call @_ZN4Task12promise_typeD1Ev(%[[PROMISE]])
-// CIR-NEXT:      cir.call @_ZN4DtorD1Ev(%[[D]])
+// CIR-NOEH-NEXT: cir.call @_ZN4Task12promise_typeD1Ev(%[[PROMISE]])
+// CIR-NOEH-NEXT: cir.call @_ZN4DtorD1Ev(%[[D]])
+// CIR-EH:            cir.call @_ZN4Task12promise_typeD1Ev(%[[PROMISE]])
+// CIR-EH:            cir.call @_ZN4DtorD1Ev(%[[D]])
+// CIR-EH:        } cleanup all {
 // CIR-NEXT:      cir.coro.intrinsic.free
 
 // An exception from get_return_object() propagates to the caller before the
@@ -553,7 +600,8 @@ ThrowingGROTask eh_before_body(Dtor p) { co_return; }
 // CIR:         cir.coroutine initialSuspend : {
 // CIR-NOT:       cir.call @_ZN4DtorD1Ev
 // CIR:         }, destroy : {
-// CIR-NEXT:      cir.call @_ZN4DtorD1Ev(%[[P]])
+// CIR-NOEH-NEXT: cir.call @_ZN4DtorD1Ev(%[[P]])
+// CIR-EH:            cir.call @_ZN4DtorD1Ev(%[[P]])
 
 // LLVM-LABEL: define {{.*}} @_Z14eh_before_body4Dtor(
 // LLVM:         %[[P_COPY:.+]] = alloca %struct.Dtor

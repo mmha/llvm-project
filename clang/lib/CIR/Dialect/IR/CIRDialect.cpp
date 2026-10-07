@@ -3808,9 +3808,8 @@ void cir::CoroutineOp::getSuccessorRegions(
 
   // destroy falls through to exit (normal return). The edge to the parent
   // stands in for an exception from a destructor, which keeps propagating out
-  // of the op instead of going through exit's cir.return.
-  // FIXME: Unlike in classic CodeGen, such an exception does not destroy the
-  // remaining parameter copies or free the frame yet.
+  // of the op, after the rest of the coroutine state has been destroyed,
+  // instead of going through exit's cir.return.
   if (parent == &getDestroy()) {
     regions.emplace_back(&getExit());
     regions.push_back(RegionSuccessor(getOperation())); // unwind out of the op

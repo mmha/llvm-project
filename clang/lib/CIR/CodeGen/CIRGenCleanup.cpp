@@ -884,6 +884,41 @@ void CIRGenFunction::emitCapturedCleanups(EHScopeStack::stable_iterator depth,
   }
 }
 
+void CIRGenFunction::emitCapturedCleanupsAsScopes(
+    EHScopeStack::stable_iterator depth) {
+  // Copy the captured cleanups off the EH stack, the last captured one first.
+  struct CapturedCleanup {
+    CleanupKind kind;
+    llvm::SmallVector<char, 8 * sizeof(void *)> data;
+  };
+  llvm::SmallVector<CapturedCleanup> captured;
+  while (ehStack.stable_begin() != depth) {
+    assert(isa<EHCleanupScope>(*ehStack.begin()) && "top not a cleanup!");
+    EHCleanupScope &scope = cast<EHCleanupScope>(*ehStack.begin());
+    assert(!scope.getCleanupScopeOp() &&
+           "captured cleanup should not own a cleanup scope");
+    assert(!scope.hasActiveFlag() && "captured cleanup with an active flag");
+    unsigned kind = 0;
+    if (scope.isNormalCleanup())
+      kind |= NormalCleanup;
+    if (scope.isEHCleanup())
+      kind |= EHCleanup;
+    if (scope.isLifetimeMarker())
+      kind |= LifetimeMarker;
+    auto *data = static_cast<char *>(scope.getCleanupBuffer());
+    captured.push_back({static_cast<CleanupKind>(kind),
+                        {data, data + scope.getCleanupSize()}});
+    ehStack.popCleanup();
+  }
+
+  // Push them again in the order in which they were captured, each one
+  // opening a cir.cleanup.scope, and emit them.
+  for (const CapturedCleanup &cleanup : llvm::reverse(captured))
+    ehStack.pushCopyOfCleanup(cleanup.kind, cleanup.data.data(),
+                              cleanup.data.size());
+  popCleanupBlocks(depth);
+}
+
 /// Pops cleanup blocks until the given savepoint is reached.
 void CIRGenFunction::popCleanupBlocks(
     EHScopeStack::stable_iterator oldCleanupStackDepth,

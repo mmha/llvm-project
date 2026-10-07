@@ -987,11 +987,32 @@ CIRGenFunction::emitCoroutineBody(const CoroutineBodyStmt &s) {
 
     // Destroy the promise and the parameter copies, then free the frame.
     auto destroyBuilder = [&]() -> mlir::LogicalResult {
-      frameCleanups.emitIntoCleanupRegion(openCurlyLoc);
-      if (emitCoroDeallocate(*this, s, openCurlyLoc).failed())
-        return mlir::failure();
+      if (!destroyStateOnThrow || stateObjects.empty()) {
+        frameCleanups.emitIntoCleanupRegion(openCurlyLoc);
+        if (emitCoroDeallocate(*this, s, openCurlyLoc).failed())
+          return mlir::failure();
+        cir::YieldOp::create(builder, openCurlyLoc);
+        return mlir::success();
+      }
+
+      // Like the cleanups of classic CodeGen, an exception from one of the
+      // destructors still destroys the objects constructed before and frees
+      // the frame before it leaves the region.
+      mlir::LogicalResult deallocRes = mlir::success();
+      auto deallocScope = cir::CleanupScopeOp::create(
+          builder, openCurlyLoc, cir::CleanupKind::All,
+          /*bodyBuilder=*/[](mlir::OpBuilder &, mlir::Location) {},
+          /*cleanupBuilder=*/
+          [&](mlir::OpBuilder &b, mlir::Location loc) {
+            deallocRes = emitCoroDeallocate(*this, s, openCurlyLoc);
+            cir::YieldOp::create(b, loc);
+          });
+      builder.setInsertionPointToEnd(&deallocScope.getBodyRegion().back());
+      frameCleanups.emitAsNestedScopes();
       cir::YieldOp::create(builder, openCurlyLoc);
-      return mlir::success();
+      builder.setInsertionPointAfter(deallocScope);
+      cir::YieldOp::create(builder, openCurlyLoc);
+      return deallocRes;
     };
 
     // Builds `unwind`, like the cleanups CallCoroEnd and CallCoroDelete of

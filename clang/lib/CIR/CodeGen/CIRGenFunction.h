@@ -1258,6 +1258,13 @@ public:
   void emitCapturedCleanups(EHScopeStack::stable_iterator depth,
                             mlir::Location loc);
 
+  /// Like emitCapturedCleanups, but push the captured cleanups again as
+  /// ordinary cleanups, the first captured one outermost, and pop them, so that
+  /// each one is emitted as a cir.cleanup.scope around the ones captured after
+  /// it. An exception from one of them then still runs the ones captured
+  /// before it. None of them may have an active flag.
+  void emitCapturedCleanupsAsScopes(EHScopeStack::stable_iterator depth);
+
   void terminateStructuredRegionBody(mlir::Region &r, mlir::Location loc);
 
   /// Deactivates the given cleanup block. The block cannot be reactivated. Pops
@@ -1538,6 +1545,14 @@ public:
     void emitIntoCleanupRegion(mlir::Location loc) {
       if (active)
         cgf.emitCapturedCleanups(depth, loc);
+    }
+
+    /// Emit the captured cleanups at the current insertion point as nested
+    /// cir.cleanup.scope operations, so that an exception from one of them
+    /// still runs the ones captured before it.
+    void emitAsNestedScopes() {
+      if (active)
+        cgf.emitCapturedCleanupsAsScopes(depth);
     }
 
   private:

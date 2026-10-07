@@ -4889,9 +4889,10 @@ def CIR_CoroutineOp : CIR_Op<"coroutine", [
       suspend point, including the initial and final ones, or by normal
       completion through `final_suspend` (and `gro`), and falls through to
       `exit`. It runs the destructors unconditionally, so an exception must
-      not reach it. FIXME: Unlike in classic CodeGen, an exception from one
-      of these destructors does not destroy the remaining parameter copies or
-      free the frame yet.
+      not reach it. An exception from one of these destructors still
+      destroys the remaining parameter copies and frees the frame before it
+      leaves the op, through `cir.cleanup.scope` operations of kind `all`
+      around them.
 
     - `unwind`: the cleanup for an exception that leaves `initial_suspend`,
       `body`, `final_suspend` or `gro`, for example one that
