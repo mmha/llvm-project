@@ -1034,7 +1034,7 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &s) {
         condVar &&
         (condVar->needsDestruction(getContext()) != QualType::DK_none ||
          shouldEmitLifetimeMarkersForAutoVar());
-    DeferredLoopConditionCleanup loopCondScope(*this, needsCondCleanup);
+    CapturedCleanups loopCondScope(*this, needsCondCleanup);
 
     auto condBuilder = [&](mlir::OpBuilder &b, mlir::Location loc) {
       assert(!cir::MissingFeatures::createProfileWeightsForLoop());
@@ -1076,7 +1076,7 @@ mlir::LogicalResult CIRGenFunction::emitForStmt(const ForStmt &s) {
           getLoc(s.getSourceRange()), condBuilder, bodyBuilder, stepBuilder,
           /*cleanupBuilder=*/
           [&](mlir::OpBuilder &b, mlir::Location loc) {
-            loopCondScope.emitIntoLoopCleanupRegion(loc);
+            loopCondScope.emitIntoCleanupRegion(loc);
             builder.createYield(loc);
           },
           cleanupKind);
@@ -1168,7 +1168,7 @@ mlir::LogicalResult CIRGenFunction::emitWhileStmt(const WhileStmt &s) {
         condVar &&
         (condVar->needsDestruction(getContext()) != QualType::DK_none ||
          shouldEmitLifetimeMarkersForAutoVar());
-    DeferredLoopConditionCleanup loopCondScope(*this, needsCondCleanup);
+    CapturedCleanups loopCondScope(*this, needsCondCleanup);
 
     auto condBuilder = [&](mlir::OpBuilder &b, mlir::Location loc) {
       assert(!cir::MissingFeatures::createProfileWeightsForLoop());
@@ -1198,7 +1198,7 @@ mlir::LogicalResult CIRGenFunction::emitWhileStmt(const WhileStmt &s) {
           getLoc(s.getSourceRange()), condBuilder, bodyBuilder,
           /*cleanupBuilder=*/
           [&](mlir::OpBuilder &b, mlir::Location loc) {
-            loopCondScope.emitIntoLoopCleanupRegion(loc);
+            loopCondScope.emitIntoCleanupRegion(loc);
             builder.createYield(loc);
           },
           cleanupKind);
