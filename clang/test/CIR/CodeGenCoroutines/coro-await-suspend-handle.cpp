@@ -6,10 +6,10 @@
 // RUN: FileCheck --input-file=%t-acc.cir %s -check-prefixes=CIR,CIR-NOEH
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fclangir -emit-cir -fno-clangir-call-conv-lowering %s -o %t-gen.cir
 // RUN: FileCheck --input-file=%t-gen.cir %s -check-prefix=CIRGEN
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fclangir -emit-llvm -disable-llvm-passes %s -o %t-cir.ll
+// RUN: FileCheck --input-file=%t-cir.ll %s -check-prefix=LLVM
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -emit-llvm -disable-llvm-passes %s -o %t.ll
 // RUN: FileCheck --input-file=%t.ll %s -check-prefix=OGCG
-
-// FIXME: Add an LLVM-through-CIR run once cir.coroutine is lowered.
 
 // The wrappers are functions without a declaration. The -fopenacc run checks
 // that creating them does not look for OpenACC routine directives.
@@ -62,6 +62,16 @@ struct TypedTransferAwaiter {
 // CIR-NEXT:   cir.coro.intrinsic.await.suspend.handle(%[[TYPED_TRANSFER]], %[[FRAME]], @_Z8transferv.__await_suspend_wrapper__await2) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
 // CIR-NEXT:   cir.coro.suspend_point
 // CIR-NEXT: }, resume : {
+
+// LLVM: define dso_local void @_Z8transferv()
+// LLVM:   %[[FRAME:.*]] = call ptr @llvm.coro.begin(
+// LLVM:   call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z8transferv.__await_suspend_wrapper__init)
+// LLVM:   %[[SAVE:.*]] = call token @llvm.coro.save(ptr null)
+// LLVM-NEXT:   call void @llvm.coro.await.suspend.handle(ptr %{{.*}}, ptr %[[FRAME]], ptr @_Z8transferv.__await_suspend_wrapper__await)
+// LLVM-NEXT:   call i8 @llvm.coro.suspend(token %[[SAVE]], i1 false)
+// LLVM:   %[[SAVE2:.*]] = call token @llvm.coro.save(ptr null)
+// LLVM-NEXT:   call void @llvm.coro.await.suspend.handle(ptr %{{.*}}, ptr %[[FRAME]], ptr @_Z8transferv.__await_suspend_wrapper__await2)
+// LLVM-NEXT:   call i8 @llvm.coro.suspend(token %[[SAVE2]], i1 false)
 
 // OGCG: define dso_local void @_Z8transferv()
 // OGCG:   %[[FRAME:.*]] = call ptr @llvm.coro.begin(
@@ -121,6 +131,13 @@ Task transfer() {
 // CIR:   %[[RET:.*]] = cir.load %[[RETVAL]]
 // CIR:   cir.return %[[RET]] : !cir.ptr<!void>
 
+// LLVM: define internal noundef ptr @_Z8transferv.__await_suspend_wrapper__await(ptr noundef nonnull %{{.*}}, ptr noundef %{{.*}})
+// LLVM:   call void @_ZN15TransferAwaiter13await_suspendESt16coroutine_handleIN4Task12promise_typeEE(
+// LLVM:   %[[ADDRESS:.*]] = call noundef ptr @_ZNKSt16coroutine_handleIvE7addressEv(
+// LLVM:   store ptr %[[ADDRESS]], ptr %[[RETVAL:.*]],
+// LLVM:   %[[RET:.*]] = load ptr, ptr %[[RETVAL]]
+// LLVM:   ret ptr %[[RET]]
+
 // OGCG: define internal noundef ptr @_Z8transferv.__await_suspend_wrapper__await(ptr noundef nonnull %[[AWAITER_ARG:.*]], ptr noundef %[[FRAME_ARG:.*]])
 // OGCG:   %[[AWAITER_ARG_ADDR:.*]] = alloca ptr
 // OGCG:   %[[FRAME_ARG_ADDR:.*]] = alloca ptr
@@ -162,6 +179,15 @@ struct VoidAwaiter {
 // CIR:   cir.coro.intrinsic.await.suspend.void({{.*}}, @_Z5namesv.__await_suspend_wrapper__yield2)
 // CIR:   cir.coro.intrinsic.await.suspend.handle({{.*}}, @_Z5namesv.__await_suspend_wrapper__await3)
 // CIR:   cir.coro.intrinsic.await.suspend.void({{.*}}, @_Z5namesv.__await_suspend_wrapper__final)
+
+// LLVM: define dso_local void @_Z5namesv()
+// LLVM:   call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z5namesv.__await_suspend_wrapper__init)
+// LLVM:   call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z5namesv.__await_suspend_wrapper__await)
+// LLVM:   call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z5namesv.__await_suspend_wrapper__await2)
+// LLVM:   call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z5namesv.__await_suspend_wrapper__yield)
+// LLVM:   call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z5namesv.__await_suspend_wrapper__yield2)
+// LLVM:   call void @llvm.coro.await.suspend.handle({{.*}}, ptr @_Z5namesv.__await_suspend_wrapper__await3)
+// LLVM:   call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z5namesv.__await_suspend_wrapper__final)
 
 // OGCG: define dso_local void @_Z5namesv()
 // OGCG:   call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z5namesv.__await_suspend_wrapper__init)

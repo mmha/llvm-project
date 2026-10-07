@@ -1,8 +1,12 @@
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fcxx-exceptions -fexceptions -fclangir -emit-cir %s -o %t.cir
 // RUN: FileCheck --input-file=%t.cir %s -check-prefix=CIR
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fcxx-exceptions -fexceptions -fclangir -emit-llvm -disable-llvm-passes %s -o %t-cir.ll
+// RUN: FileCheck --input-file=%t-cir.ll %s -check-prefix=LLVM
 
-// FIXME: we currently don't have flatten-cfg for coroutines or lower to LLVM-IR
-// implemented correctly, so this tests only the CIR output.
+// FIXME: An exception that leaves the coroutine, e.g. one that
+// unhandled_exception() rethrows, does not end the coroutine with
+// coro.end(unwind=true) yet, so the LLVM checks do not cover that path and
+// there is no comparison with classic CodeGen.
 
 #include "Inputs/coroutine.h"
 
@@ -39,6 +43,25 @@ TaskWithEH simple_eh_body() {
 // Make sure that 'final' is outside of the above try/catch/etc.
 // CIR: }, finalSuspend : {
 // CIR: cir.call @_ZN10TaskWithEH12promise_type13final_suspendEv
+
+// The implicit handler catches every exception from the body, calls
+// unhandled_exception() and continues with the final suspend point.
+
+// LLVM-LABEL: define {{.*}} @_Z14simple_eh_bodyv(
+// LLVM:         call i8 @llvm.coro.suspend(token %{{.*}}, i1 false)
+// LLVM:         invoke void @_ZN10TaskWithEH12promise_type11return_voidEv(
+// LLVM-NEXT:      to label %[[CONT:.*]] unwind label %[[LPAD:.*]]
+// LLVM:       [[CONT]]:
+// LLVM-NEXT:    br label %[[FINAL:.*]]
+// LLVM:       [[LPAD]]:
+// LLVM-NEXT:    landingpad { ptr, i32 }
+// LLVM-NEXT:      catch ptr null
+// LLVM:         call ptr @__cxa_begin_catch(
+// LLVM:         invoke void @_ZN10TaskWithEH12promise_type19unhandled_exceptionEv(
+// LLVM:         call void @__cxa_end_catch()
+// LLVM:       [[FINAL]]:
+// LLVM-NEXT:    call void @_ZN10TaskWithEH12promise_type13final_suspendEv(
+// LLVM:         call i8 @llvm.coro.suspend(token %{{.*}}, i1 true)
 
 TaskThrowingInit throwing_init_suspend() {
   co_return;
@@ -93,3 +116,26 @@ TaskThrowingInit throwing_init_suspend() {
 // CIR:   cir.yield
 // CIR: }, finalSuspend : {
 // CIR: cir.call @_ZN16TaskThrowingInit12promise_type13final_suspendEv
+
+// An exception from the initial await_resume is passed to
+// unhandled_exception() too, and then the body is skipped.
+
+// LLVM-LABEL: define {{.*}} @_Z21throwing_init_suspendv(
+// LLVM:         %[[RESUME_FLAG:.*]] = alloca i8
+// LLVM:         call i8 @llvm.coro.suspend(token %{{.*}}, i1 false)
+// LLVM:         store i8 0, ptr %[[RESUME_FLAG]]
+// LLVM:         invoke void @_ZNSt19suspend_maybe_throw12await_resumeEv(
+// LLVM-NEXT:      to label %[[RESUMED:.*]] unwind label %[[LPAD:.*]]
+// LLVM:       [[RESUMED]]:
+// LLVM-NEXT:    store i8 1, ptr %[[RESUME_FLAG]]
+// LLVM:       [[LPAD]]:
+// LLVM-NEXT:    landingpad { ptr, i32 }
+// LLVM-NEXT:      catch ptr null
+// LLVM:         invoke void @_ZN16TaskThrowingInit12promise_type19unhandled_exceptionEv(
+// LLVM:         %[[FLAG:.*]] = load i8, ptr %[[RESUME_FLAG]]
+// LLVM-NEXT:    %[[RAN:.*]] = trunc i8 %[[FLAG]] to i1
+// LLVM-NEXT:    br i1 %[[RAN]], label %[[BODY:.*]], label %{{.*}}
+// LLVM:       [[BODY]]:
+// LLVM:         invoke void @_ZN16TaskThrowingInit12promise_type11return_voidEv(
+// LLVM:         call void @_ZN16TaskThrowingInit12promise_type13final_suspendEv(
+// LLVM:         call i8 @llvm.coro.suspend(token %{{.*}}, i1 true)

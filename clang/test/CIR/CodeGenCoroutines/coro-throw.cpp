@@ -2,11 +2,10 @@
 // RUN: FileCheck --input-file=%t.cir %s -check-prefix=CIR
 // RUN: cir-opt -cir-flatten-cfg %t.cir -o %t.flat.cir
 // RUN: FileCheck --input-file=%t.flat.cir %s -check-prefix=CIR-FLAT
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fcxx-exceptions -fexceptions -fclangir -emit-llvm -disable-llvm-passes %s -o %t-cir.ll
+// RUN: FileCheck --input-file=%t-cir.ll %s -check-prefix=LLVM
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fcxx-exceptions -fexceptions -emit-llvm -disable-llvm-passes %s -o %t.ll
 // RUN: FileCheck --input-file=%t.ll %s -check-prefix=OGCG
-
-// FIXME: cir.coroutine is not lowered to LLVM IR yet, so there is no
-// LLVM-through-CIR run.
 
 // A throw in a coroutine body is inside the implicit try/catch that calls
 // unhandled_exception(), so CFG flattening turns it into a cir.try_throw. That
@@ -46,6 +45,17 @@ TaskWithEH throw_in_body(bool b) {
 // CIR-FLAT:         cir.eh.dispatch
 // CIR-FLAT:         cir.begin_catch
 // CIR-FLAT:         cir.try_call @_ZN10TaskWithEH12promise_type19unhandled_exceptionEv
+
+// LLVM-LABEL: define dso_local void @_Z13throw_in_bodyb(
+// LLVM:         invoke void @__cxa_throw(ptr %{{.*}}, ptr @_ZTIi, ptr null)
+// LLVM-NEXT:            to label %[[UNREACH:[0-9]+]] unwind label %[[LPAD:[0-9]+]]
+// LLVM:       [[UNREACH]]:
+// LLVM-NEXT:    unreachable
+// LLVM:       [[LPAD]]:
+// LLVM-NEXT:    landingpad { ptr, i32 }
+// LLVM-NEXT:            catch ptr null
+// LLVM:         call ptr @__cxa_begin_catch(
+// LLVM:         invoke void @_ZN10TaskWithEH12promise_type19unhandled_exceptionEv(
 
 // OGCG-LABEL: define dso_local void @_Z13throw_in_bodyb(
 // OGCG:         invoke void @__cxa_throw(ptr %{{.*}}, ptr @_ZTIi, ptr null)
@@ -96,6 +106,19 @@ TaskWithEH throw_in_cleanup_in_body(bool b) {
 // CIR-FLAT:         cir.eh.dispatch
 // CIR-FLAT:         cir.begin_catch
 // CIR-FLAT:         cir.try_call @_ZN10TaskWithEH12promise_type19unhandled_exceptionEv
+
+// LLVM-LABEL: define dso_local void @_Z24throw_in_cleanup_in_bodyb(
+// LLVM:         %[[S:.*]] = alloca %struct.S
+// LLVM:         invoke void @__cxa_throw(ptr %{{.*}}, ptr @_ZTIi, ptr null)
+// LLVM-NEXT:            to label %[[UNREACH:[0-9]+]] unwind label %[[LPAD:[0-9]+]]
+// LLVM:       [[UNREACH]]:
+// LLVM-NEXT:    unreachable
+// LLVM:       [[LPAD]]:
+// LLVM-NEXT:    landingpad { ptr, i32 }
+// LLVM-NEXT:            catch ptr null
+// LLVM:         call void @_ZN1SD1Ev(ptr {{.*}} %[[S]])
+// LLVM:         call ptr @__cxa_begin_catch(
+// LLVM:         invoke void @_ZN10TaskWithEH12promise_type19unhandled_exceptionEv(
 
 // OGCG-LABEL: define dso_local void @_Z24throw_in_cleanup_in_bodyb(
 // OGCG:         %[[S:.*]] = alloca %struct.S

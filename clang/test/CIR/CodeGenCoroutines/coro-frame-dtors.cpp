@@ -4,11 +4,10 @@
 // RUN: FileCheck --input-file=%t-eh.cir %s -check-prefixes=CIR,CIR-EH
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -O1 -fclangir -emit-cir %s -o %t-O1.cir
 // RUN: FileCheck --input-file=%t-O1.cir %s -check-prefix=CIR-O1
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fclangir -emit-llvm -disable-llvm-passes %s -o %t-cir.ll
+// RUN: FileCheck --input-file=%t-cir.ll %s -check-prefix=LLVM
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -emit-llvm -disable-llvm-passes %s -o %t.ll
 // RUN: FileCheck --input-file=%t.ll %s -check-prefix=OGCG
-
-// FIXME: There is no FlattenCFG or LLVM lowering for cir.coroutine yet, so
-// there is no LLVM-through-CIR run. OGCG shows the classic coro.cleanup order.
 
 // The parameter copies and the promise are destroyed with the coroutine state,
 // the promise first, before the coroutine frame is freed
@@ -70,6 +69,16 @@ Task promise_dtor() { co_return; }
 // CIR-NEXT:    }, exit : {
 // CIR-NOT:     cir.call @_ZN4Task12promise_typeD1Ev
 
+// LLVM-LABEL: define {{.*}} @_Z12promise_dtorv(
+// LLVM:         %[[PROMISE:.+]] = alloca %"struct.Task::promise_type"
+// LLVM:         %[[BEGIN:.*]] = call ptr @llvm.coro.begin(
+// LLVM:         call void @_ZN4Task12promise_typeD1Ev(ptr {{[^,]*}} %[[PROMISE]])
+// LLVM-NEXT:    call ptr @llvm.coro.free(
+// LLVM:         call void @_ZdlPvm(
+// LLVM-NEXT:    br label %[[AFTER_FREE:.*]]
+// LLVM:       [[AFTER_FREE]]:
+// LLVM-NEXT:    call void @llvm.coro.dead(ptr %[[BEGIN]])
+
 // OGCG-LABEL: define {{.*}} @_Z12promise_dtorv(
 // OGCG:         %[[BEGIN:.*]] = call ptr @llvm.coro.begin(
 // OGCG:       coro.cleanup:
@@ -100,6 +109,11 @@ TrivialTask param_dtor(Dtor p) {
 // CIR-NEXT:    }
 // CIR-NOT:     cir.cleanup.scope
 // CIR-NOT:     cir.call @_ZN4DtorD1Ev
+
+// LLVM-LABEL: define {{.*}} @_Z10param_dtor4Dtor(
+// LLVM:         %[[P_COPY:.+]] = alloca %struct.Dtor
+// LLVM:         call void @_ZN4DtorD1Ev(ptr {{[^,]*}} %[[P_COPY]])
+// LLVM-NEXT:    call ptr @llvm.coro.free(
 
 // OGCG-LABEL: define {{.*}} @_Z10param_dtor4Dtor(
 // OGCG:         %[[P_COPY:.+]] = alloca %struct.Dtor
@@ -170,6 +184,15 @@ Task promise_and_params(Dtor a, int i, Dtor b) {
 // CIR-O1-NEXT:      cir.call @_ZN4DtorD1Ev(%[[A]])
 // CIR-O1-NEXT:      cir.lifetime.end %[[A]]
 // CIR-O1-NEXT:      cir.coro.intrinsic.free
+
+// LLVM-LABEL: define {{.*}} @_Z18promise_and_params4DtoriS_(
+// LLVM:         %[[A_COPY:.+]] = alloca %struct.Dtor
+// LLVM:         %[[B_COPY:.+]] = alloca %struct.Dtor
+// LLVM:         %[[PROMISE:.+]] = alloca %"struct.Task::promise_type"
+// LLVM:         call void @_ZN4Task12promise_typeD1Ev(ptr {{[^,]*}} %[[PROMISE]])
+// LLVM-NEXT:    call void @_ZN4DtorD1Ev(ptr {{[^,]*}} %[[B_COPY]])
+// LLVM-NEXT:    call void @_ZN4DtorD1Ev(ptr {{[^,]*}} %[[A_COPY]])
+// LLVM-NEXT:    call ptr @llvm.coro.free(
 
 // OGCG-LABEL: define {{.*}} @_Z18promise_and_params4DtoriS_(
 // OGCG:         %[[A_COPY:.+]] = alloca %struct.Dtor
@@ -436,6 +459,11 @@ ThrowingGROTask eh_before_body(Dtor p) { co_return; }
 // CIR-NOT:       cir.call @_ZN4DtorD1Ev
 // CIR:         }, destroy : {
 // CIR-NEXT:      cir.call @_ZN4DtorD1Ev(%[[P]])
+
+// LLVM-LABEL: define {{.*}} @_Z14eh_before_body4Dtor(
+// LLVM:         %[[P_COPY:.+]] = alloca %struct.Dtor
+// LLVM:         call void @_ZN4DtorD1Ev(ptr {{[^,]*}} %[[P_COPY]])
+// LLVM-NEXT:    call ptr @llvm.coro.free(
 
 // OGCG-LABEL: define {{.*}} @_Z14eh_before_body4Dtor(
 // OGCG:         %[[P_COPY:.+]] = alloca %struct.Dtor

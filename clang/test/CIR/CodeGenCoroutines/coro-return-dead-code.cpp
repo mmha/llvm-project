@@ -4,18 +4,19 @@
 // RUN: FileCheck --input-file=%t-eh.cir %s -check-prefixes=CIR,CIR-EH
 // RUN: cir-opt -cir-flatten-cfg %t.cir -o %t-flat.cir
 // RUN: FileCheck --input-file=%t-flat.cir %s -check-prefix=CIR-FLAT
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fclangir -emit-llvm -disable-llvm-passes %s -o %t-cir.ll
+// RUN: FileCheck --input-file=%t-cir.ll %s -check-prefix=LLVM
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fcxx-exceptions -fexceptions -fclangir -emit-llvm -disable-llvm-passes %s -o %t-cir-eh.ll
+// RUN: FileCheck --input-file=%t-cir-eh.ll %s -check-prefix=LLVM-EH
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -emit-llvm -disable-llvm-passes %s -o %t.ll
 // RUN: FileCheck --input-file=%t.ll %s -check-prefix=OGCG --implicit-check-not=_Z4deadv
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fcxx-exceptions -fexceptions -emit-llvm -disable-llvm-passes %s -o %t-eh.ll
 // RUN: FileCheck --input-file=%t-eh.ll %s -check-prefix=OGCG --implicit-check-not=_Z4deadv
 
-// FIXME: cir.coroutine is not lowered to LLVM IR yet, so there is no
-// LLVM-through-CIR run.
-
 // Statements after a co_return that no label makes reachable are dead. As
 // after a return, CIRGen emits them into a new block without predecessors,
-// which is kept through CFG flattening. Classic codegen does not emit them at
-// all.
+// which is kept through CFG flattening and the lowering to LLVM IR. Classic
+// codegen does not emit them at all.
 
 #include "Inputs/coroutine.h"
 
@@ -64,9 +65,18 @@ IntTask co_return_value(int v) {
 
 // CIR-FLAT-LABEL: cir.func {{.*}} @_Z15co_return_valuei(
 // CIR-FLAT:         cir.call @_ZN7IntTask12promise_type12return_valueEi(
-// CIR-FLAT-NEXT:    cir.co_return
+// CIR-FLAT-NEXT:    cir.goto "coro.final"
 // CIR-FLAT-NEXT:  ^bb{{[0-9]+}}:  // no predecessors
 // CIR-FLAT-NEXT:    cir.call @_Z4deadv()
+
+// LLVM-LABEL: define {{.*}} @_Z15co_return_valuei(
+// LLVM:         call void @_ZN7IntTask12promise_type12return_valueEi(
+// LLVM-NEXT:    br label %[[FINAL:[0-9]+]]
+// LLVM:       {{[0-9]+}}:{{ *}}; No predecessors!
+// LLVM-NEXT:    call void @_Z4deadv()
+// LLVM-NEXT:    br label %[[FINAL]]
+// LLVM:       [[FINAL]]:
+// LLVM-NEXT:    call void @_ZN7IntTask12promise_type13final_suspendEv(
 
 // OGCG-LABEL: define {{.*}} @_Z15co_return_valuei(
 // OGCG:         {{call|invoke}} void @_ZN7IntTask12promise_type12return_valueEi(
@@ -101,11 +111,21 @@ Task co_return_void() {
 
 // CIR-FLAT-LABEL: cir.func {{.*}} @_Z14co_return_voidv(
 // CIR-FLAT:         cir.call @_ZN4Task12promise_type11return_voidEv(
-// CIR-FLAT-NEXT:    cir.co_return
+// CIR-FLAT-NEXT:    cir.goto "coro.final"
 // CIR-FLAT-NEXT:  ^bb{{[0-9]+}}:  // no predecessors
 // CIR-FLAT:         cir.call @_Z4deadv()
 // CIR-FLAT-NOT:     @_ZN4Task12promise_type11return_voidEv
-// CIR-FLAT:       }, finalSuspend : {
+// CIR-FLAT:         cir.label "coro.final"
+
+// LLVM-LABEL: define {{.*}} @_Z14co_return_voidv(
+// LLVM:         call void @_ZN4Task12promise_type11return_voidEv(
+// LLVM-NEXT:    br label %[[FINAL:[0-9]+]]
+// LLVM:       {{[0-9]+}}:{{ *}}; No predecessors!
+// LLVM:         call void @_Z4deadv()
+// LLVM:         call void @_ZN1SD1Ev(
+// LLVM-NOT:     @_ZN4Task12promise_type11return_voidEv
+// LLVM:       [[FINAL]]:
+// LLVM-NEXT:    call void @_ZN4Task12promise_type13final_suspendEv(
 
 // OGCG-LABEL: define {{.*}} @_Z14co_return_voidv(
 // OGCG:         {{call|invoke}} void @_ZN4Task12promise_type11return_voidEv(
@@ -133,8 +153,9 @@ Task co_return_at_end() {
 
 // CIR-FLAT-LABEL: cir.func {{.*}} @_Z16co_return_at_endv(
 // CIR-FLAT:         cir.call @_ZN4Task12promise_type11return_voidEv(
-// CIR-FLAT-NEXT:    cir.co_return
-// CIR-FLAT-NEXT:  }, finalSuspend : {
+// CIR-FLAT-NEXT:    cir.goto "coro.final"
+// CIR-FLAT-NEXT:  ^bb{{[0-9]+}}:  // no predecessors
+// CIR-FLAT-NEXT:    cir.label "coro.final"
 
 Task co_return_in_block() {
   {
@@ -160,11 +181,30 @@ Task co_return_in_block() {
 // CIR-NEXT:          }
 // CIR-NEXT:        }
 
+// The co_return leaves the scope through the cleanup of s, on its way to the
+// final suspend point.
+//
 // CIR-FLAT-LABEL: cir.func {{.*}} @_Z18co_return_in_blockv(
 // CIR-FLAT:         cir.call @_ZN4Task12promise_type11return_voidEv(
-// CIR-FLAT-NEXT:    cir.co_return
+// CIR-FLAT-NEXT:    %[[ONE:.*]] = cir.const #cir.int<1> : !s32i
+// CIR-FLAT-NEXT:    cir.store %[[ONE]], %[[SLOT:.*]] : !s32i, !cir.ptr<!s32i>
+// CIR-FLAT-NEXT:    cir.br ^[[CLEANUP:bb[0-9]+]]
 // CIR-FLAT-NEXT:  ^bb{{[0-9]+}}:  // no predecessors
 // CIR-FLAT-NEXT:    cir.call @_Z4deadv()
+// CIR-FLAT:       ^[[CLEANUP]]:
+// CIR-FLAT-NEXT:    cir.call @_ZN1SD1Ev(
+// CIR-FLAT:         cir.switch.flat %{{.*}} : !s32i, ^{{bb[0-9]+}} [
+// CIR-FLAT-NEXT:      0: ^{{bb[0-9]+}},
+// CIR-FLAT-NEXT:      1: ^[[TO_FINAL:bb[0-9]+]]
+// CIR-FLAT-NEXT:    ]
+// CIR-FLAT:       ^[[TO_FINAL]]:
+// CIR-FLAT-NEXT:    cir.goto "coro.final"
+
+// LLVM-LABEL: define {{.*}} @_Z18co_return_in_blockv(
+// LLVM:         call void @_ZN4Task12promise_type11return_voidEv(
+// LLVM:       {{[0-9]+}}:{{ *}}; No predecessors!
+// LLVM-NEXT:    call void @_Z4deadv()
+// LLVM:         call void @_ZN1SD1Ev(
 
 // OGCG-LABEL: define {{.*}} @_Z18co_return_in_blockv(
 // OGCG:         {{call|invoke}} void @_ZN4Task12promise_type11return_voidEv(
@@ -198,11 +238,11 @@ Task co_return_in_if(bool b) {
 
 // CIR-FLAT-LABEL: cir.func {{.*}} @_Z15co_return_in_ifb(
 // CIR-FLAT:         cir.call @_ZN4Task12promise_type11return_voidEv(
-// CIR-FLAT-NEXT:    cir.co_return
+// CIR-FLAT-NEXT:    cir.goto "coro.final"
 // CIR-FLAT-NEXT:  ^bb{{[0-9]+}}:  // no predecessors
 // CIR-FLAT-NEXT:    cir.call @_Z4deadv()
 // CIR-FLAT:         cir.call @_ZN4Task12promise_type11return_voidEv(
-// CIR-FLAT-NEXT:    cir.co_return
+// CIR-FLAT-NEXT:    cir.goto "coro.final"
 // CIR-FLAT-NEXT:  ^bb{{[0-9]+}}:  // no predecessors
 // CIR-FLAT-NEXT:    cir.call @_Z4deadv()
 
@@ -227,7 +267,7 @@ Task co_return_in_loop(bool b) {
 
 // CIR-FLAT-LABEL: cir.func {{.*}} @_Z17co_return_in_loopb(
 // CIR-FLAT:         cir.call @_ZN4Task12promise_type11return_voidEv(
-// CIR-FLAT-NEXT:    cir.co_return
+// CIR-FLAT-NEXT:    cir.goto "coro.final"
 // CIR-FLAT-NEXT:  ^bb{{[0-9]+}}:  // no predecessors
 // CIR-FLAT-NEXT:    cir.call @_Z4deadv()
 
@@ -253,7 +293,7 @@ Task co_return_in_switch(int i) {
 
 // CIR-FLAT-LABEL: cir.func {{.*}} @_Z19co_return_in_switchi(
 // CIR-FLAT:         cir.call @_ZN4Task12promise_type11return_voidEv(
-// CIR-FLAT-NEXT:    cir.co_return
+// CIR-FLAT-NEXT:    cir.goto "coro.final"
 // CIR-FLAT-NEXT:  ^bb{{[0-9]+}}:  // no predecessors
 // CIR-FLAT-NEXT:    cir.call @_Z4deadv()
 
@@ -276,9 +316,21 @@ Task dead_co_await() {
 
 // CIR-FLAT-LABEL: cir.func {{.*}} @_Z13dead_co_awaitv(
 // CIR-FLAT:         cir.call @_ZN4Task12promise_type11return_voidEv(
-// CIR-FLAT-NEXT:    cir.co_return
+// CIR-FLAT-NEXT:    cir.goto "coro.final"
 // CIR-FLAT-NEXT:  ^bb{{[0-9]+}}:  // no predecessors
-// CIR-FLAT-NEXT:    cir.await(user, ready : {
+// CIR-FLAT-NEXT:    cir.br ^[[READY:bb[0-9]+]]
+// CIR-FLAT-NEXT:  ^[[READY]]:
+// CIR-FLAT-NEXT:    cir.call @_ZNSt13suspend_never11await_readyEv(
+
+// LLVM-LABEL: define {{.*}} @_Z13dead_co_awaitv(
+// LLVM:         call void @_ZN4Task12promise_type11return_voidEv(
+// LLVM-NEXT:    br label %[[FINAL:[0-9]+]]
+// LLVM:       {{[0-9]+}}:{{ *}}; No predecessors!
+// LLVM:         call {{.*}} @_ZNSt13suspend_never11await_readyEv(
+// LLVM:         call i8 @llvm.coro.suspend(token %{{.*}}, i1 false)
+// LLVM:         call void @_ZNSt13suspend_never12await_resumeEv(
+// LLVM:       [[FINAL]]:
+// LLVM-NEXT:    call void @_ZN4Task12promise_type13final_suspendEv(
 
 // OGCG-LABEL: define {{.*}} @_Z13dead_co_awaitv(
 // OGCG-NOT:     suspend_never
@@ -313,13 +365,24 @@ l:
 
 // CIR-FLAT-LABEL: cir.func {{.*}} @_Z21label_after_co_returnb(
 // CIR-FLAT:         cir.goto "l"
-// CIR-FLAT:         cir.co_return
+// CIR-FLAT:         cir.call @_ZN4Task12promise_type11return_voidEv(
+// CIR-FLAT-NEXT:    cir.goto "coro.final"
 // CIR-FLAT-NEXT:  ^bb{{[0-9]+}}:  // no predecessors
 // CIR-FLAT-NEXT:    cir.label "l"
 // CIR-FLAT-NEXT:    cir.call @_Z4livev()
 // CIR-FLAT-NEXT:    cir.call @_ZN4Task12promise_type11return_voidEv(
-// CIR-FLAT-NEXT:    cir.co_return
-// CIR-FLAT-NEXT:  }, finalSuspend : {
+// CIR-FLAT-NEXT:    cir.goto "coro.final"
+// CIR-FLAT-NEXT:  ^bb{{[0-9]+}}:  // no predecessors
+// CIR-FLAT-NEXT:    cir.label "coro.final"
+
+// LLVM-LABEL: define {{.*}} @_Z21label_after_co_returnb(
+// LLVM:         call void @_ZN4Task12promise_type11return_voidEv(
+// LLVM-NEXT:    br label %[[FINAL:[0-9]+]]
+// LLVM:         call void @_Z4livev()
+// LLVM-NEXT:    call void @_ZN4Task12promise_type11return_voidEv(
+// LLVM-NEXT:    br label %[[FINAL]]
+// LLVM:       [[FINAL]]:
+// LLVM-NEXT:    call void @_ZN4Task12promise_type13final_suspendEv(
 
 // OGCG-LABEL: define {{.*}} @_Z21label_after_co_returnb(
 // OGCG:       {{^}}l:
@@ -420,11 +483,14 @@ l:
 // CIR-NOEH-NEXT: }, finalSuspend : {
 // CIR-EH-NEXT:   } catch all
 
+// The empty block falls through to the final suspend point.
+//
 // CIR-FLAT-LABEL: cir.func {{.*}} @_Z11goto_at_endv(
 // CIR-FLAT:         cir.goto "l"
 // CIR-FLAT-NEXT:  ^bb{{[0-9]+}}:  // no predecessors
-// CIR-FLAT-NEXT:    cir.yield
-// CIR-FLAT-NEXT:  }, finalSuspend : {
+// CIR-FLAT-NEXT:    cir.br ^[[FINAL:bb[0-9]+]]
+// CIR-FLAT-NEXT:  ^[[FINAL]]:
+// CIR-FLAT-NEXT:    cir.label "coro.final"
 
 Task goto_after_co_return() {
 l:
@@ -445,12 +511,14 @@ l:
 // CIR-EH-NEXT:   } catch all
 
 // CIR-FLAT-LABEL: cir.func {{.*}} @_Z20goto_after_co_returnv(
-// CIR-FLAT:         cir.co_return
+// CIR-FLAT:         cir.call @_ZN4Task12promise_type11return_voidEv(
+// CIR-FLAT-NEXT:    cir.goto "coro.final"
 // CIR-FLAT-NEXT:  ^bb{{[0-9]+}}:  // no predecessors
 // CIR-FLAT-NEXT:    cir.goto "l"
 // CIR-FLAT-NEXT:  ^bb{{[0-9]+}}:  // no predecessors
-// CIR-FLAT-NEXT:    cir.yield
-// CIR-FLAT-NEXT:  }, finalSuspend : {
+// CIR-FLAT-NEXT:    cir.br ^[[FINAL:bb[0-9]+]]
+// CIR-FLAT-NEXT:  ^[[FINAL]]:
+// CIR-FLAT-NEXT:    cir.label "coro.final"
 
 IntTask unreachable_after_switch(int i) {
   switch (i) {
@@ -474,8 +542,9 @@ IntTask unreachable_after_switch(int i) {
 // CIR-FLAT-LABEL: cir.func {{.*}} @_Z24unreachable_after_switchi(
 // CIR-FLAT:         cir.unreachable
 // CIR-FLAT-NEXT:  ^bb{{[0-9]+}}:  // no predecessors
-// CIR-FLAT-NEXT:    cir.yield
-// CIR-FLAT-NEXT:  }, finalSuspend : {
+// CIR-FLAT-NEXT:    cir.br ^[[FINAL:bb[0-9]+]]
+// CIR-FLAT-NEXT:  ^[[FINAL]]:
+// CIR-FLAT-NEXT:    cir.label "coro.final"
 
 IntTask trap_at_end() {
   co_await std::suspend_always{};
@@ -521,3 +590,18 @@ Task co_return_in_try() {
 // CIR-EH-NEXT:            cir.yield
 // CIR-EH-NEXT:          } cleanup all {
 // CIR-EH-NEXT:            cir.end_catch
+
+// LLVM-EH-LABEL: define {{.*}} @_Z16co_return_in_tryv(
+// LLVM-EH:         invoke void @_ZN4Task12promise_type11return_voidEv(
+// LLVM-EH-NEXT:            to label %{{.*}} unwind label %[[LPAD:[0-9]+]]
+// LLVM-EH:       {{[0-9]+}}:{{ *}}; No predecessors!
+// LLVM-EH-NEXT:    invoke void @_Z4deadv()
+// LLVM-EH-NEXT:            to label %{{.*}} unwind label %[[LPAD]]
+// LLVM-EH:       [[LPAD]]:
+// LLVM-EH-NEXT:    landingpad { ptr, i32 }
+// LLVM-EH-NEXT:            catch ptr null
+// LLVM-EH:         call ptr @__cxa_begin_catch(
+// LLVM-EH:         invoke void @_ZN4Task12promise_type11return_voidEv(
+// LLVM-EH:       {{[0-9]+}}:{{ *}}; No predecessors!
+// LLVM-EH-NEXT:    invoke void @_Z4deadv()
+// LLVM-EH:         call void @__cxa_end_catch()

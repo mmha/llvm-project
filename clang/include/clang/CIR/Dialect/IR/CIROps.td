@@ -4265,8 +4265,10 @@ def CIR_FuncOp : CIR_Op<"func", [
     A compiler builtin function must be marked as `builtin` for further
     processing when lowering from CIR.
 
-    The `coroutine` keyword is used to mark a coroutine function, which requires
-    at least one `cir.await` instruction to be used in its body.
+    The `coroutine` keyword is used to mark a coroutine function. Its body
+    contains one `cir.coroutine` operation until the CFG is flattened, which
+    inlines the `cir.coroutine` into the function body. The keyword is kept
+    afterwards and lowers to the `presplitcoroutine` LLVM function attribute.
 
     The `lambda` translates to a C++ `operator()` that implements a lambda, this
     allow callsites to make certain assumptions about the real function nature
@@ -4868,6 +4870,14 @@ def CIR_CoroutineOp : CIR_Op<"coroutine", [
       pausing), and from `destroy` when it was entered via ordinary
       dispatch. Holds `coro.end` + the actual `cir.return`.
 
+    The CFG flattening pass inlines the regions into the function in the
+    order above. Each region falls through to the next one, and `exit` returns
+    from the function. A `cir.co_return` branches to `final_suspend` through
+    the cleanups of the scopes it leaves. Each `cir.await` becomes the
+    `coro.save` / `coro.suspend` protocol of the LLVM coroutine passes (see
+    `llvm/docs/Coroutines.md`): the coroutine continues in the `resume` region
+    of the `cir.await`, branches to `destroy` through the cleanups of the
+    scopes it leaves, or branches to `exit` without running any cleanup.
   }];
 
   // TODO(cir): Add GRO and EH
@@ -4942,9 +4952,14 @@ def CIR_AwaitOp : CIR_RegionBranchOpBase<"await", [
       - resume: handles x.await_resume()
 
     Breaking this up in regions allows individual scrutiny of conditions
-    which might lead to folding some of them out. Lowerings coming out
-    of CIR, e.g. LLVM, should use the `suspend` region to track more
-    lower level codegen (e.g. intrinsic emission for coro.save/coro.suspend).
+    which might lead to folding some of them out. The CFG flattening pass
+    emits the lower level operations: a `cir.coro.intrinsic.save` at the
+    start of the `suspend` region, and a `cir.coro.intrinsic.suspend` in
+    place of the `cir.coro.suspend_point` (or, for an await_suspend that
+    returns bool, when its result is true). A switch on the result of the
+    latter continues in `resume`, leaves the scopes around the `cir.await`
+    for the `destroy` region of the enclosing `cir.coroutine`, or returns
+    through `cir.coro.suspend_exit`.
 
     There are also 4 flavors of `cir.await` available:
     - `init`: compiler generated initial suspend via implicit `co_await`.
@@ -5515,6 +5530,50 @@ def CIR_CoroSuspendPoint : CIR_Op<"coro.suspend_point", [
   let assemblyFormat = [{
     attr-dict
   }];
+
+  let hasLLVMLowering = false;
+}
+
+//===----------------------------------------------------------------------===//
+// CoroSuspendExitOp
+//===----------------------------------------------------------------------===//
+
+def CIR_CoroSuspendExitOp : CIR_Op<"coro.suspend_exit", [
+  Terminator, HasAncestor<"CoroutineOp">
+]> {
+  let summary = "Returns from a suspended coroutine to its caller or resumer";
+  let description = [{
+    Transfers control to the `exit` region of the enclosing `cir.coroutine`
+    after the coroutine has suspended, so that the function returns to its
+    caller or resumer while the coroutine stays suspended. It is the path
+    taken when `cir.coro.intrinsic.suspend` returns neither 0 (resumed) nor
+    1 (destroyed).
+
+    The coroutine returns without exiting any scope ([expr.await]p5.1,
+    [stmt.jump.general]p2): no cleanup runs and every object stays alive in
+    the coroutine frame. Flattening `cir.cleanup.scope`, `cir.try`, loops and
+    switches therefore leaves this operation in place instead of treating it
+    as an exit.
+
+    The operation only exists during the flattening of a coroutine: the
+    flattening of a `cir.await` creates it, and the flattening of the
+    enclosing `cir.coroutine` replaces it with a branch to the `exit` region.
+
+    Example:
+
+    ```mlir
+    %s = cir.coro.intrinsic.suspend(%save, %false)
+        : (token, !cir.bool) -> !u8i
+    cir.switch.flat %s : !u8i, ^suspended [
+      0: ^resumed,
+      1: ^destroyed
+    ]
+    ^suspended:
+      cir.coro.suspend_exit
+    ```
+  }];
+
+  let assemblyFormat = "attr-dict";
 
   let hasLLVMLowering = false;
 }

@@ -287,3 +287,9 @@ cir.func coroutine @final_suspend_invalid_await(%arg0 : !cir.bool) {
   }
   cir.trap
 }
+
+// -----
+
+cir.func @suspend_exit_outside_coroutine() {
+  cir.coro.suspend_exit // expected-error {{expects ancestor op 'cir.coroutine'}}
+}

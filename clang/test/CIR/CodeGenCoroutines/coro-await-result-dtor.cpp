@@ -4,13 +4,14 @@
 // RUN: FileCheck --input-file=%t-eh.cir %s -check-prefixes=CIR,CIR-EH
 // RUN: cir-opt -cir-flatten-cfg %t.cir -o %t-flat.cir
 // RUN: FileCheck --input-file=%t-flat.cir %s -check-prefix=CIR-FLAT
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fclangir -emit-llvm -disable-llvm-passes %s -o %t-cir.ll
+// RUN: FileCheck --input-file=%t-cir.ll %s -check-prefix=LLVM
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fcxx-exceptions -fexceptions -fclangir -emit-llvm -disable-llvm-passes %s -o %t-cir-eh.ll
+// RUN: FileCheck --input-file=%t-cir-eh.ll %s -check-prefix=LLVM-EH
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -emit-llvm -disable-llvm-passes %s -o %t.ll
 // RUN: FileCheck --input-file=%t.ll %s -check-prefix=OGCG
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fcxx-exceptions -fexceptions -emit-llvm -disable-llvm-passes %s -o %t-eh.ll
 // RUN: FileCheck --input-file=%t-eh.ll %s -check-prefix=OGCG-EH
-
-// FIXME: cir.coroutine is not lowered to LLVM IR yet, so there is no
-// LLVM-through-CIR run.
 
 // The result of await_resume() is constructed in the resume region of the
 // cir.await. A temporary result lives until the end of the full-expression, so
@@ -78,6 +79,12 @@ Task discarded_co_await() {
 // CIR-FLAT-NOT:     cir.call @_ZN2NTD1Ev(
 // CIR-FLAT:         cir.call @_Z4nextv()
 
+// LLVM-LABEL: define {{.*}} void @_Z18discarded_co_awaitv(
+// LLVM:         call void @_ZN2Aw12await_resumeEv(ptr {{.*}} %[[TMP:.*]], ptr
+// LLVM:         call void @_ZN2NTD1Ev(ptr {{.*}} %[[TMP]])
+// LLVM-NOT:     call void @_ZN2NTD1Ev(
+// LLVM:         call void @_Z4nextv()
+
 // OGCG-LABEL: define {{.*}} void @_Z18discarded_co_awaitv(
 // OGCG:       await.ready:
 // OGCG-NEXT:    call void @_ZN2Aw12await_resumeEv(ptr {{.*}} %[[TMP:.*]], ptr
@@ -104,6 +111,12 @@ Task discarded_co_yield() {
 // CIR-NEXT:      cir.yield
 // CIR-NEXT:    }
 // CIR-NEXT:    cir.call @_Z4nextv()
+
+// LLVM-LABEL: define {{.*}} void @_Z18discarded_co_yieldv(
+// LLVM:         call void @_ZN2Aw12await_resumeEv(ptr {{.*}} %[[TMP:.*]], ptr
+// LLVM:         call void @_ZN2NTD1Ev(ptr {{.*}} %[[TMP]])
+// LLVM-NOT:     call void @_ZN2NTD1Ev(
+// LLVM:         call void @_Z4nextv()
 
 // OGCG-LABEL: define {{.*}} void @_Z18discarded_co_yieldv(
 // OGCG:       yield.ready:
@@ -148,6 +161,20 @@ Task discarded_with_later_temporary() {
 // CIR-FLAT:         cir.call @_ZN1HD1Ev(%[[H]])
 // CIR-FLAT:         cir.call @_ZN2NTD1Ev(%[[TMP]])
 
+// LLVM-LABEL: define {{.*}} void @_Z30discarded_with_later_temporaryv(
+// LLVM:         call void @_ZN2Aw12await_resumeEv(ptr {{.*}} %[[TMP:.*]], ptr
+// LLVM:         call void @_Z6make_hv(ptr {{.*}} %[[H:.*]])
+// LLVM:         call void @_ZN1HD1Ev(ptr {{.*}} %[[H]])
+// LLVM:         call void @_ZN2NTD1Ev(ptr {{.*}} %[[TMP]])
+
+// LLVM-EH-LABEL: define {{.*}} void @_Z30discarded_with_later_temporaryv(
+// LLVM-EH:         invoke void @_ZN2Aw12await_resumeEv(ptr {{.*}} %[[TMP:.*]], ptr
+// LLVM-EH:         invoke void @_Z6make_hv(
+// LLVM-EH-NEXT:      to label %{{.*}} unwind label %[[LPAD:[0-9]+]]
+// LLVM-EH:       [[LPAD]]:
+// LLVM-EH-NEXT:    landingpad
+// LLVM-EH:         call void @_ZN2NTD1Ev(ptr {{.*}} %[[TMP]])
+
 // OGCG-LABEL: define {{.*}} void @_Z30discarded_with_later_temporaryv(
 // OGCG:       await.ready:
 // OGCG-NEXT:    call void @_ZN2Aw12await_resumeEv(ptr {{.*}} %[[TMP:.*]], ptr
@@ -186,6 +213,12 @@ Task by_value_argument() {
 // CIR-NEXT:      cir.yield
 // CIR-NEXT:    }
 
+// LLVM-LABEL: define {{.*}} void @_Z17by_value_argumentv(
+// LLVM:         call void @_ZN2Aw12await_resumeEv(ptr {{.*}} %[[ARG:.*]], ptr
+// LLVM:         call void @_Z4take2NT(ptr {{.*}} %[[ARG]])
+// LLVM:         call void @_ZN2NTD1Ev(ptr {{.*}} %[[ARG]])
+// LLVM-NOT:     call void @_ZN2NTD1Ev(
+
 // OGCG-LABEL: define {{.*}} void @_Z17by_value_argumentv(
 // OGCG:       await.ready:
 // OGCG-NEXT:    call void @_ZN2Aw12await_resumeEv(ptr {{.*}} %[[ARG:.*]], ptr
@@ -215,6 +248,12 @@ Task bound_to_variable() {
 // CIR-NEXT:      cir.yield
 // CIR-NEXT:    }
 
+// LLVM-LABEL: define {{.*}} void @_Z17bound_to_variablev(
+// LLVM:         call void @_ZN2Aw12await_resumeEv(ptr {{.*}} %[[V:.*]], ptr
+// LLVM:         call void @_Z4nextv()
+// LLVM:         call void @_ZN2NTD1Ev(ptr {{.*}} %[[V]])
+// LLVM-NOT:     call void @_ZN2NTD1Ev(
+
 // OGCG-LABEL: define {{.*}} void @_Z17bound_to_variablev(
 // OGCG:       await.ready:
 // OGCG-NEXT:    call void @_ZN2Aw12await_resumeEv(ptr {{.*}} %[[V:.*]], ptr
@@ -242,6 +281,12 @@ Task materialized() {
 // CIR-NEXT:      cir.call @_ZN2NTD1Ev(%[[REF]])
 // CIR-NEXT:      cir.yield
 // CIR-NEXT:    }
+
+// LLVM-LABEL: define {{.*}} void @_Z12materializedv(
+// LLVM:         call void @_ZN2Aw12await_resumeEv(ptr {{.*}} %[[REF:.*]], ptr
+// LLVM:         call void @_Z3useRK2NT(ptr {{.*}} %[[REF]])
+// LLVM:         call void @_ZN2NTD1Ev(ptr {{.*}} %[[REF]])
+// LLVM-NOT:     call void @_ZN2NTD1Ev(
 
 // OGCG-LABEL: define {{.*}} void @_Z12materializedv(
 // OGCG:       await.ready:
@@ -291,6 +336,28 @@ Task two_co_awaits() {
 // CIR-FLAT:         cir.call @_ZN2NTD1Ev(%[[A2]])
 // CIR-FLAT:         cir.call @_ZN2NTD1Ev(%[[A1]])
 
+// Destroying the coroutine at the second suspend point destroys the first
+// result only.
+//
+// LLVM-LABEL: define {{.*}} void @_Z13two_co_awaitsv(
+// LLVM:         call void @_ZN2Aw12await_resumeEv(ptr {{.*}} %[[A1:[0-9]+]], ptr
+// LLVM:         call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z13two_co_awaitsv.__await_suspend_wrapper__await2)
+// LLVM-NEXT:    %[[SUSPEND:.*]] = call i8 @llvm.coro.suspend(token %{{.*}}, i1 false)
+// LLVM-NEXT:    switch i8 %[[SUSPEND]], label %{{.*}} [
+// LLVM-NEXT:      i8 0, label %{{.*}}
+// LLVM-NEXT:      i8 1, label %[[DESTROYED:[0-9]+]]
+// LLVM-NEXT:    ]
+// LLVM:       [[DESTROYED]]:
+// LLVM-NEXT:    store i32 1, ptr %[[SLOT:[0-9]+]]
+// LLVM-NEXT:    br label %[[A1_CLEANUP:[0-9]+]]
+// LLVM:         call void @_ZN2Aw12await_resumeEv(ptr {{.*}} %[[A2:[0-9]+]], ptr
+// LLVM:         call void @_Z5take22NTS_(ptr {{.*}} %[[A1]], ptr {{.*}} %[[A2]])
+// LLVM:         call void @_ZN2NTD1Ev(ptr {{.*}} %[[A2]])
+// LLVM:         store i32 0, ptr %[[SLOT]]
+// LLVM-NEXT:    br label %[[A1_CLEANUP]]
+// LLVM:       [[A1_CLEANUP]]:
+// LLVM-NEXT:    call void @_ZN2NTD1Ev(ptr {{.*}} %[[A1]])
+
 // OGCG-LABEL: define {{.*}} void @_Z13two_co_awaitsv(
 // OGCG:       await2.cleanup:
 // OGCG-NEXT:    br label %[[CLEANUP:.*]]
@@ -329,6 +396,18 @@ Task conditional(bool b) {
 // CIR-NEXT:      cir.if %[[IS_ACTIVE]] {
 // CIR-NEXT:        cir.call @_ZN2NTD1Ev(%[[TMP]])
 // CIR:         cir.call @_Z4nextv()
+
+// LLVM-LABEL: define {{.*}} void @_Z11conditionalb(
+// LLVM:         call void @_ZN2Aw12await_resumeEv(ptr {{.*}} %[[TMP:[0-9]+]], ptr
+// LLVM-NEXT:    br label %[[SET:[0-9]+]]
+// LLVM:       [[SET]]:
+// LLVM-NEXT:    store i8 1, ptr %[[ACTIVE:[0-9]+]]
+// LLVM:         %[[FLAG:.*]] = load i8, ptr %[[ACTIVE]]
+// LLVM-NEXT:    %[[IS_ACTIVE:.*]] = trunc i8 %[[FLAG]] to i1
+// LLVM-NEXT:    br i1 %[[IS_ACTIVE]], label %[[DTOR:[0-9]+]], label
+// LLVM:       [[DTOR]]:
+// LLVM-NEXT:    call void @_ZN2NTD1Ev(ptr {{.*}} %[[TMP]])
+// LLVM:         call void @_Z4nextv()
 
 // OGCG-LABEL: define {{.*}} void @_Z11conditionalb(
 // OGCG:       await.ready:
@@ -420,6 +499,13 @@ InitFinalTask initial_and_final_suspend() {
 // CIR-NEXT:      }
 // CIR-NEXT:      cir.yield
 // CIR-NEXT:    }, destroy : {
+
+// LLVM-LABEL: define {{.*}} void @_Z25initial_and_final_suspendv(
+// LLVM:         call void @_ZN6InitAw12await_resumeEv(ptr {{.*}} %[[INIT:.*]], ptr
+// LLVM:         call void @_ZN2NTD1Ev(ptr {{.*}} %[[INIT]])
+// LLVM:         call void @_Z4nextv()
+// LLVM:         call void @_ZN7FinalAw12await_resumeEv(ptr {{.*}} %[[FINAL:.*]], ptr
+// LLVM:         call void @_ZN2NTD1Ev(ptr {{.*}} %[[FINAL]])
 
 // OGCG-LABEL: define {{.*}} void @_Z25initial_and_final_suspendv(
 // OGCG:       init.ready:

@@ -4,13 +4,16 @@
 // RUN: FileCheck --input-file=%t-eh.cir %s -check-prefixes=CIR,CIR-EH
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -O1 -fclangir -emit-cir %s -o %t-O1.cir
 // RUN: FileCheck --input-file=%t-O1.cir %s -check-prefix=CIR-O1
+// RUN: cir-opt -cir-flatten-cfg %t.cir -o %t-flat.cir
+// RUN: FileCheck --input-file=%t-flat.cir %s -check-prefix=CIR-FLAT
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fclangir -emit-llvm -disable-llvm-passes %s -o %t-cir.ll
+// RUN: FileCheck --input-file=%t-cir.ll %s -check-prefixes=LLVM,LLVM-NOEH
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fcxx-exceptions -fexceptions -fclangir -emit-llvm -disable-llvm-passes %s -o %t-cir-eh.ll
+// RUN: FileCheck --input-file=%t-cir-eh.ll %s -check-prefixes=LLVM,LLVM-EH
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -emit-llvm -disable-llvm-passes %s -o %t.ll
 // RUN: FileCheck --input-file=%t.ll %s -check-prefixes=OGCG,OGCG-NOEH
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fcxx-exceptions -fexceptions -emit-llvm -disable-llvm-passes %s -o %t-eh.ll
 // RUN: FileCheck --input-file=%t-eh.ll %s -check-prefixes=OGCG,OGCG-EH
-
-// FIXME: There is no FlattenCFG or LLVM lowering for cir.coroutine yet, so
-// there is no LLVM-through-CIR run.
 
 // When the body of a coroutine falls off its end, the implicit `co_return;`
 // runs after the body: the body's local variables are destroyed first, then
@@ -65,6 +68,23 @@ Task falls_off_end() {
 // CIR-EH-NEXT:     cir.yield
 // CIR-EH-NEXT:   } catch all
 // CIR:         }, finalSuspend : {
+
+// CIR-FLAT-LABEL: cir.func {{.*}} @_Z13falls_off_endv(
+// CIR-FLAT:         cir.call @_ZN1SD1Ev(
+// CIR-FLAT-NOT:     cir.call @_ZN1SD1Ev(
+// CIR-FLAT:         cir.call @_ZN4Task12promise_type11return_voidEv(
+
+// LLVM-LABEL: define {{.*}} void @_Z13falls_off_endv(
+// LLVM:         call void @_ZN1SD1Ev(ptr {{.*}} %[[S:.*]])
+// LLVM-NOT:     call void @_ZN1SD1Ev(
+// LLVM-NOEH:    call void @_ZN4Task12promise_type11return_voidEv(
+// LLVM-EH:      invoke void @_ZN4Task12promise_type11return_voidEv(
+// LLVM-EH-NEXT:   to label %{{.*}} unwind label %[[LPAD:[0-9]+]]
+// LLVM-EH:      [[LPAD]]:
+// LLVM-EH-NEXT:   landingpad
+// LLVM-EH-NEXT:     catch ptr null
+// LLVM-NOT:     call void @_ZN1SD1Ev(
+// LLVM:         call void @_ZN4Task12promise_type13final_suspendEv(
 
 // OGCG-LABEL: define {{.*}} void @_Z13falls_off_endv(
 // OGCG:         call void @_ZN1SD1Ev(ptr {{.*}} %[[S:.*]])
@@ -195,6 +215,19 @@ Task co_return_in_if(bool b) {
 // OGCG-NOEH-NEXT: br label %coro.final
 // OGCG-EH-NEXT:   invoke void @_ZN4Task12promise_type11return_voidEv(
 
+// LLVM-LABEL: define {{.*}} void @_Z15co_return_in_ifb(
+// LLVM-NOEH:    call void @_ZN4Task12promise_type11return_voidEv(
+// LLVM-EH:      invoke void @_ZN4Task12promise_type11return_voidEv(
+// LLVM:         call void @_ZN1SD1Ev(
+// LLVM:         switch i32 %{{.*}}, label %{{.*}} [
+// LLVM-NEXT:      i32 {{[0-9]+}}, label %[[FALLTHROUGH:[0-9]+]]
+// LLVM-NEXT:      i32 {{[0-9]+}}, label %[[FINAL:[0-9]+]]
+// LLVM-NEXT:    ]
+// LLVM:       [[FALLTHROUGH]]:
+// LLVM-NOEH:    call void @_ZN4Task12promise_type11return_voidEv(
+// LLVM-EH:      invoke void @_ZN4Task12promise_type11return_voidEv(
+// LLVM:         call void @_ZN4Task12promise_type13final_suspendEv(
+
 Task co_return_at_end() {
   co_await std::suspend_always{};
   S s;
@@ -230,3 +263,16 @@ Task co_return_at_end() {
 // OGCG-EH-NEXT:   call void @_ZN1SD1Ev(
 // OGCG-NOT:     return_void
 // OGCG:         br label %coro.final
+
+// CIR-FLAT-LABEL: cir.func {{.*}} @_Z16co_return_at_endv(
+// CIR-FLAT:         cir.call @_ZN4Task12promise_type11return_voidEv(
+// CIR-FLAT:         cir.call @_ZN1SD1Ev(
+// CIR-FLAT-NOT:     cir.call @_ZN4Task12promise_type11return_voidEv(
+// CIR-FLAT:         cir.call @_ZN4Task12promise_type13final_suspendEv(
+
+// LLVM-LABEL: define {{.*}} void @_Z16co_return_at_endv(
+// LLVM-NOEH:    call void @_ZN4Task12promise_type11return_voidEv(
+// LLVM-EH:      invoke void @_ZN4Task12promise_type11return_voidEv(
+// LLVM:         call void @_ZN1SD1Ev(
+// LLVM-NOT:     return_void
+// LLVM:         call void @_ZN4Task12promise_type13final_suspendEv(

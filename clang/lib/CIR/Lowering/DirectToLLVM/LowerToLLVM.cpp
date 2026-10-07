@@ -3037,6 +3037,10 @@ mlir::LogicalResult CIRToLLVMFuncOpLowering::matchAndRewrite(
     if (op->hasAttr(flagAttr))
       passthrough.push_back(rewriter.getStringAttr(flagAttr));
 
+  // The LLVM coroutine passes only split functions that carry this attribute.
+  if (op.getCoroutine())
+    passthrough.push_back(rewriter.getStringAttr("presplitcoroutine"));
+
   if (auto moduleId = op->getAttrOfType<mlir::StringAttr>(
           CIRDialect::getSYCLModuleIdAttrName()))
     passthrough.push_back(rewriter.getArrayAttr(

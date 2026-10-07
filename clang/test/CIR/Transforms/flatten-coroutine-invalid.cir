@@ -1,0 +1,41 @@
+// RUN: cir-opt %s -cir-flatten-cfg -verify-diagnostics -split-input-file
+
+// The cir.await ops of a cir.coroutine are flattened before the coroutine. An
+// operation that the pass does not flatten keeps the coroutine from being
+// flattened, which is reported instead of leaving an invalid coroutine behind.
+
+!void = !cir.void
+
+cir.func private @wrapper_void(!cir.ptr<!void>, !cir.ptr<!void>)
+cir.func private @ready() -> !cir.bool
+
+cir.func coroutine @acc_in_body(%awaiter : !cir.ptr<!void>, %frame : !cir.ptr<!void>) {
+  cir.coroutine initialSuspend : {
+    cir.await(init, ready : {
+      %r = cir.call @ready() : () -> !cir.bool
+      cir.condition(%r)
+    }, suspend : {
+      cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @wrapper_void) nothrow : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+      cir.coro.suspend_point
+    }, resume : {
+      cir.yield
+    },)
+    cir.yield
+  }, body : {
+    cir.scope {
+      // expected-error @below {{Not yet implemented: flattening a cir.coroutine that contains this operation}}
+      acc.parallel {
+        acc.yield
+      }
+      cir.yield
+    }
+    cir.co_return
+  }, finalSuspend : {
+    cir.yield
+  }, destroy : {
+    cir.yield
+  }, exit : {
+    cir.return
+  }
+  cir.trap
+}

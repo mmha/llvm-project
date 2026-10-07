@@ -1,0 +1,25 @@
+// RUN: cir-opt %s -cir-to-llvm -o - | FileCheck %s -check-prefix=MLIR
+// RUN: cir-opt %s -cir-to-llvm -o - | cir-translate -mlir-to-llvmir | FileCheck %s -check-prefix=LLVM
+
+// A coroutine whose cir.coroutine has been flattened lowers to a function
+// that the LLVM coroutine passes split.
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu"} {
+  cir.func coroutine @coro() {
+    cir.return
+  }
+
+  cir.func @not_coro() {
+    cir.return
+  }
+}
+
+// MLIR-LABEL: llvm.func @coro()
+// MLIR-SAME:    passthrough = ["presplitcoroutine"]
+
+// MLIR-LABEL: llvm.func @not_coro()
+// MLIR-NOT:     presplitcoroutine
+
+// LLVM: define void @coro() #[[ATTRS:[0-9]+]]
+// LLVM: define void @not_coro() {
+// LLVM: attributes #[[ATTRS]] = { presplitcoroutine }

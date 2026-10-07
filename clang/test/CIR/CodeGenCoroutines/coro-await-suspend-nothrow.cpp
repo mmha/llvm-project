@@ -2,17 +2,21 @@
 // RUN: FileCheck --input-file=%t.cir %s -check-prefix=CIR
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fclangir -emit-cir -fcxx-exceptions -fexceptions %s -o %t-eh.cir
 // RUN: FileCheck --input-file=%t-eh.cir %s -check-prefix=CIR
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fclangir -emit-llvm -disable-llvm-passes %s -o %t-cir.ll
+// RUN: FileCheck --input-file=%t-cir.ll %s -check-prefix=LLVM
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fclangir -emit-llvm -disable-llvm-passes -fcxx-exceptions -fexceptions %s -o %t-cir-eh.ll
+// RUN: FileCheck --input-file=%t-cir-eh.ll %s -check-prefix=LLVM-EH
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -emit-llvm -disable-llvm-passes %s -o %t.ll
-// RUN: FileCheck --input-file=%t.ll %s -check-prefix=OGCG
+// RUN: FileCheck --input-file=%t.ll %s -check-prefix=LLVM
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -emit-llvm -disable-llvm-passes -fcxx-exceptions -fexceptions %s -o %t-eh.ll
-// RUN: FileCheck --input-file=%t-eh.ll %s -check-prefix=OGCG-EH
-
-// FIXME: Add an LLVM-through-CIR run once cir.coroutine is lowered.
+// RUN: FileCheck --input-file=%t-eh.ll %s -check-prefix=LLVM-EH
 
 // An await_suspend wrapper call is nothrow when the suspend expression cannot
 // throw and await_suspend does not return a coroutine handle, the rule of
 // classic codegen, with or without exceptions. Classic codegen marks such a
-// call nounwind and invokes the other ones inside an EH scope.
+// call nounwind and invokes the other ones inside an EH scope, here the
+// handler that calls unhandled_exception(), and so does the lowering through
+// CIR. The LLVM checks are shared.
 
 #include "Inputs/coroutine.h"
 
@@ -89,24 +93,24 @@ Task f() {
 // CIR: cir.coro.intrinsic.await.suspend.void(%{{.*}}, %{{.*}}, @_Z1fv.__await_suspend_wrapper__await6) :
 // CIR: cir.coro.intrinsic.await.suspend.void(%{{.*}}, %{{.*}}, @_Z1fv.__await_suspend_wrapper__final) nothrow :
 
-// OGCG-LABEL: define dso_local void @_Z1fv()
-// OGCG: call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__init) #[[NOUNWIND:[0-9]+]]
-// OGCG: call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await) #[[NOUNWIND]]
-// OGCG: call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await2){{$}}
-// OGCG: call i1 @llvm.coro.await.suspend.bool({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await3) #[[NOUNWIND]]
-// OGCG: call i1 @llvm.coro.await.suspend.bool({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await4){{$}}
-// OGCG: call void @llvm.coro.await.suspend.handle({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await5){{$}}
-// OGCG: call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await6){{$}}
-// OGCG: call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__final) #[[NOUNWIND]]
-// OGCG: attributes #[[NOUNWIND]] = { nounwind }
+// LLVM-LABEL: define dso_local void @_Z1fv()
+// LLVM: call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__init) #[[NOUNWIND:[0-9]+]]
+// LLVM: call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await) #[[NOUNWIND]]
+// LLVM: call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await2){{$}}
+// LLVM: call i1 @llvm.coro.await.suspend.bool({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await3) #[[NOUNWIND]]
+// LLVM: call i1 @llvm.coro.await.suspend.bool({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await4){{$}}
+// LLVM: call void @llvm.coro.await.suspend.handle({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await5){{$}}
+// LLVM: call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await6){{$}}
+// LLVM: call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__final) #[[NOUNWIND]]
+// LLVM: attributes #[[NOUNWIND]] = { nounwind }
 
-// OGCG-EH-LABEL: define dso_local void @_Z1fv()
-// OGCG-EH: call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__init) #[[NOUNWIND:[0-9]+]]
-// OGCG-EH: call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await) #[[NOUNWIND]]
-// OGCG-EH: invoke void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await2)
-// OGCG-EH: call i1 @llvm.coro.await.suspend.bool({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await3) #[[NOUNWIND]]
-// OGCG-EH: invoke i1 @llvm.coro.await.suspend.bool({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await4)
-// OGCG-EH: invoke void @llvm.coro.await.suspend.handle({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await5)
-// OGCG-EH: invoke void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await6)
-// OGCG-EH: call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__final) #[[NOUNWIND]]
-// OGCG-EH: attributes #[[NOUNWIND]] = { nounwind }
+// LLVM-EH-LABEL: define dso_local void @_Z1fv()
+// LLVM-EH: call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__init) #[[NOUNWIND:[0-9]+]]
+// LLVM-EH: call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await) #[[NOUNWIND]]
+// LLVM-EH: invoke void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await2)
+// LLVM-EH: call i1 @llvm.coro.await.suspend.bool({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await3) #[[NOUNWIND]]
+// LLVM-EH: invoke i1 @llvm.coro.await.suspend.bool({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await4)
+// LLVM-EH: invoke void @llvm.coro.await.suspend.handle({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await5)
+// LLVM-EH: invoke void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__await6)
+// LLVM-EH: call void @llvm.coro.await.suspend.void({{.*}}, ptr @_Z1fv.__await_suspend_wrapper__final) #[[NOUNWIND]]
+// LLVM-EH: attributes #[[NOUNWIND]] = { nounwind }

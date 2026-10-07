@@ -3218,20 +3218,18 @@ void cir::FuncOp::print(OpAsmPrinter &p) {
 
 mlir::LogicalResult cir::FuncOp::verify() {
 
+  // A coroutine has one cir.coroutine op until the CFG is flattened, which
+  // inlines it into the function body.
   if (!isDeclaration() && getCoroutine()) {
     int coroutineOpCount = 0;
-    this->walk([&](Operation *op) {
-      if (isa<CoroutineOp>(op)) {
-        coroutineOpCount++;
-        if (coroutineOpCount > 1) {
-          return mlir::WalkResult::interrupt();
-        }
-      }
+    this->walk([&](CoroutineOp) {
+      if (++coroutineOpCount > 1)
+        return mlir::WalkResult::interrupt();
       return mlir::WalkResult::advance();
     });
-    if (coroutineOpCount != 1)
+    if (coroutineOpCount > 1)
       return emitOpError()
-             << "coroutine function must have exactly one cir.coroutine op";
+             << "coroutine function must have at most one cir.coroutine op";
   }
 
   llvm::SmallSet<llvm::StringRef, 16> labels;

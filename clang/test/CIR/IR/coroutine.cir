@@ -34,3 +34,47 @@ cir.func coroutine @valid_coroutine(%arg0 : !cir.bool) {
 // CHECK: }, exit : {
 // CHECK: cir.return
 // CHECK: }
+
+// A cir.coroutine during CFG flattening: its cir.await ops are flat, and a
+// suspended coroutine leaves through cir.coro.suspend_exit.
+
+cir.func coroutine @flat_awaits(%arg0 : !cir.bool) {
+  cir.coroutine initialSuspend : {
+    cir.await(init, ready : {
+      cir.condition(%arg0)
+    }, suspend : {
+      cir.coro.suspend_point
+    }, resume : {
+      cir.yield
+    },)
+    cir.yield
+  }, body : {
+    %null = cir.const #cir.ptr<null> : !cir.ptr<!cir.void>
+    %save = cir.coro.intrinsic.save(%null) : (!cir.ptr<!cir.void>) -> token
+    %false = cir.const #cir.bool<false> : !cir.bool
+    %s = cir.coro.intrinsic.suspend(%save, %false) : (token, !cir.bool) -> !cir.int<u, 8>
+    cir.switch.flat %s : !cir.int<u, 8>, ^suspended [
+      0: ^resumed,
+      1: ^destroyed
+    ]
+  ^destroyed:
+    cir.goto "coro.destroy"
+  ^suspended:
+    cir.coro.suspend_exit
+  ^resumed:
+    cir.yield
+  }, finalSuspend : {
+    cir.yield
+  }, destroy : {
+    cir.label "coro.destroy"
+    cir.yield
+  }, exit : {
+    cir.return
+  }
+  cir.trap
+}
+
+// CHECK: cir.func coroutine @flat_awaits
+// CHECK:   cir.switch.flat %{{.*}} : !u8i, ^[[SUSPENDED:bb[0-9]+]] [
+// CHECK:   ^[[SUSPENDED]]:
+// CHECK-NEXT: cir.coro.suspend_exit

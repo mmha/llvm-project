@@ -1,6 +1,42 @@
 // RUN: cir-opt %s -verify-diagnostics -split-input-file
-cir.func coroutine @bad_task() { // expected-error {{coroutine function must have exactly one cir.coroutine op}}
-  cir.return
+cir.func coroutine @two_coroutine_ops(%arg0 : !cir.bool) { // expected-error {{coroutine function must have at most one cir.coroutine op}}
+  cir.coroutine initialSuspend : {
+    cir.await(init, ready : {
+      cir.condition(%arg0)
+    }, suspend : {
+      cir.coro.suspend_point
+    }, resume : {
+      cir.yield
+    },)
+    cir.yield
+  }, body : {
+    cir.yield
+  }, finalSuspend : {
+    cir.yield
+  }, destroy : {
+    cir.yield
+  }, exit : {
+    cir.return
+  }
+  cir.coroutine initialSuspend : {
+    cir.await(init, ready : {
+      cir.condition(%arg0)
+    }, suspend : {
+      cir.coro.suspend_point
+    }, resume : {
+      cir.yield
+    },)
+    cir.yield
+  }, body : {
+    cir.yield
+  }, finalSuspend : {
+    cir.yield
+  }, destroy : {
+    cir.yield
+  }, exit : {
+    cir.return
+  }
+  cir.trap
 }
 
 // -----

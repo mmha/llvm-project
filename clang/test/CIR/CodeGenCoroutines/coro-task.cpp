@@ -1,7 +1,9 @@
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fclangir -emit-cir %s -o %t.cir
 // RUN: FileCheck --input-file=%t.cir %s -check-prefix=CIR
-// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -emit-llvm  -disable-llvm-passes %s -o %t-cir.ll
-// RUN: FileCheck --input-file=%t-cir.ll %s --check-prefix=OGCG
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fclangir -emit-llvm -disable-llvm-passes %s -o %t-cir.ll
+// RUN: FileCheck --input-file=%t-cir.ll %s --check-prefix=LLVM
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -emit-llvm  -disable-llvm-passes %s -o %t.ll
+// RUN: FileCheck --input-file=%t.ll %s --check-prefix=OGCG
 
 #include "Inputs/coroutine.h"
 
@@ -223,6 +225,60 @@ VoidTask silly_task() {
 // OGCG: coro.ret:
 // OGCG:   call void @llvm.coro.end(ptr null, i1 false, token none)
 // OGCG:   ret void
+
+// Once lowered, each suspend point continues in await_resume when the
+// coroutine is resumed (0), goes to the code that destroys the coroutine state
+// and frees the frame when it is destroyed (1), and returns otherwise. The
+// regions of the cir.coroutine follow each other.
+
+// LLVM:       define dso_local void @_Z10silly_taskv() #[[ATTRS:[0-9]+]]
+// LLVM:         %[[PROMISE:.*]] = alloca %"struct.folly::coro::Task<void>::promise_type"
+// LLVM:         %[[ID:.*]] = call token @llvm.coro.id(i32 16, ptr %[[PROMISE]], ptr null, ptr null)
+// LLVM:         %[[FRAME:.*]] = call ptr @llvm.coro.begin(token %[[ID]], ptr %{{.*}})
+// LLVM:         call void @_ZN5folly4coro4TaskIvE12promise_type17get_return_objectEv(
+// LLVM:         %[[SAVE:.*]] = call token @llvm.coro.save(ptr null)
+// LLVM-NEXT:    call void @llvm.coro.await.suspend.void(ptr %{{.*}}, ptr %[[FRAME]], ptr @_Z10silly_taskv.__await_suspend_wrapper__init)
+// LLVM-NEXT:    %[[SUSPEND:.*]] = call i8 @llvm.coro.suspend(token %[[SAVE]], i1 false)
+// LLVM-NEXT:    switch i8 %[[SUSPEND]], label %[[INIT_SUSPENDED:.*]] [
+// LLVM-NEXT:      i8 0, label %[[INIT_READY:.*]]
+// LLVM-NEXT:      i8 1, label %[[INIT_DESTROYED:.*]]
+// LLVM-NEXT:    ]
+// LLVM:       [[INIT_DESTROYED]]:
+// LLVM-NEXT:    br label %[[CLEANUP:.*]]
+// LLVM:       [[INIT_SUSPENDED]]:
+// LLVM-NEXT:    br label %[[RET:.*]]
+// LLVM:       [[INIT_READY]]:
+// LLVM-NEXT:    call void @_ZNSt14suspend_always12await_resumeEv(
+// LLVM:         %[[SAVE:.*]] = call token @llvm.coro.save(ptr null)
+// LLVM-NEXT:    call void @llvm.coro.await.suspend.void(ptr %{{.*}}, ptr %[[FRAME]], ptr @_Z10silly_taskv.__await_suspend_wrapper__await)
+// LLVM-NEXT:    call i8 @llvm.coro.suspend(token %[[SAVE]], i1 false)
+// LLVM:         call void @_ZN5folly4coro4TaskIvE12promise_type11return_voidEv(
+// LLVM:         call void @_ZN5folly4coro4TaskIvE12promise_type13final_suspendEv(
+// LLVM:         %[[SAVE:.*]] = call token @llvm.coro.save(ptr null)
+// LLVM-NEXT:    call void @llvm.coro.await.suspend.void(ptr %{{.*}}, ptr %[[FRAME]], ptr @_Z10silly_taskv.__await_suspend_wrapper__final)
+// LLVM-NEXT:    %[[SUSPEND:.*]] = call i8 @llvm.coro.suspend(token %[[SAVE]], i1 true)
+// LLVM-NEXT:    switch i8 %[[SUSPEND]], label %[[FINAL_SUSPENDED:.*]] [
+// LLVM-NEXT:      i8 0, label %{{.*}}
+// LLVM-NEXT:      i8 1, label %[[FINAL_DESTROYED:.*]]
+// LLVM-NEXT:    ]
+// LLVM:       [[FINAL_DESTROYED]]:
+// LLVM-NEXT:    br label %[[CLEANUP]]
+// LLVM:       [[FINAL_SUSPENDED]]:
+// LLVM-NEXT:    br label %[[RET]]
+// LLVM:       [[CLEANUP]]:
+// LLVM-NEXT:    %[[MEM:.*]] = call ptr @llvm.coro.free(token %[[ID]], ptr %[[FRAME]])
+// LLVM-NEXT:    %[[NOT_NULL:.*]] = icmp ne ptr %[[MEM]], null
+// LLVM-NEXT:    br i1 %[[NOT_NULL]], label %[[FREE:.*]], label %[[AFTER_FREE:.*]]
+// LLVM:       [[FREE]]:
+// LLVM:         call void @_ZdlPvm(ptr noundef %[[MEM]],
+// LLVM-NEXT:    br label %[[AFTER_FREE]]
+// LLVM:       [[AFTER_FREE]]:
+// LLVM-NEXT:    call void @llvm.coro.dead(ptr %[[FRAME]])
+// LLVM:       [[RET]]:
+// LLVM-NEXT:    call void @llvm.coro.end(ptr null, i1 false, token none)
+// LLVM:         ret void
+
+// LLVM: attributes #[[ATTRS]] = {{{.*}} presplitcoroutine
 
 // The await_suspend wrapper of the initial suspend point. It gets the awaiter
 // and the coroutine frame as void pointers, gets the coroutine handle using

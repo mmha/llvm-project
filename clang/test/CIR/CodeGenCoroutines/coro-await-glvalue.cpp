@@ -2,11 +2,12 @@
 // RUN: FileCheck --input-file=%t.cir %s -check-prefixes=CIR,CIR-NOEH
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fcxx-exceptions -fexceptions -fclangir -emit-cir %s -o %t-eh.cir
 // RUN: FileCheck --input-file=%t-eh.cir %s -check-prefixes=CIR,CIR-EH
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fclangir -emit-llvm -disable-llvm-passes %s -o %t-cir.ll
+// RUN: FileCheck --input-file=%t-cir.ll %s -check-prefixes=LLVM,LLVM-NOEH
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fcxx-exceptions -fexceptions -fclangir -emit-llvm -disable-llvm-passes %s -o %t-cir-eh.ll
+// RUN: FileCheck --input-file=%t-cir-eh.ll %s -check-prefixes=LLVM,LLVM-EH
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -emit-llvm -disable-llvm-passes %s -o %t.ll
 // RUN: FileCheck --input-file=%t.ll %s -check-prefix=OGCG
-
-// FIXME: There is no FlattenCFG or LLVM lowering for cir.coroutine yet, so
-// there is no LLVM-through-CIR run.
 
 // A co_await or co_yield expression is a glvalue when await_resume() returns a
 // reference. The resume region of the cir.await stores the address that
@@ -77,6 +78,14 @@ Task bind_lvalue_reference() {
 // CIR-NEXT:    %[[R_VAL:.*]] = cir.load %[[R]] : !cir.ptr<!cir.ptr<!s32i>>, !cir.ptr<!s32i>
 // CIR-NEXT:    cir.store align(4) %[[FIVE]], %[[R_VAL]] : !s32i, !cir.ptr<!s32i>
 
+// LLVM-LABEL: define {{.*}} void @_Z21bind_lvalue_referencev(
+// LLVM:         %[[RES:.*]] = call {{.*}} ptr @_ZN5RefAw12await_resumeEv(
+// LLVM-NEXT:    store ptr %[[RES]], ptr %[[SLOT:.*]], align 8
+// LLVM:         %[[ADDR:.*]] = load ptr, ptr %[[SLOT]], align 8
+// LLVM-NEXT:    store ptr %[[ADDR]], ptr %[[R:.*]], align 8
+// LLVM-NEXT:    %[[R_VAL:.*]] = load ptr, ptr %[[R]], align 8
+// LLVM-NEXT:    store i32 5, ptr %[[R_VAL]], align 4
+
 // OGCG-LABEL: define {{.*}} void @_Z21bind_lvalue_referencev(
 // OGCG:       await.ready:
 // OGCG-NEXT:    %[[RES:.*]] = call {{.*}} ptr @_ZN5RefAw12await_resumeEv(
@@ -131,6 +140,12 @@ Task assign_to_co_await() {
 // CIR-NEXT:    %[[ADDR:.*]] = cir.load align(8) %[[SLOT]]
 // CIR-NEXT:    cir.store align(4) %[[SEVEN]], %[[ADDR]] : !s32i, !cir.ptr<!s32i>
 
+// LLVM-LABEL: define {{.*}} void @_Z18assign_to_co_awaitv(
+// LLVM:         %[[RES:.*]] = call {{.*}} ptr @_ZN5RefAw12await_resumeEv(
+// LLVM-NEXT:    store ptr %[[RES]], ptr %[[SLOT:.*]], align 8
+// LLVM:         %[[ADDR:.*]] = load ptr, ptr %[[SLOT]], align 8
+// LLVM-NEXT:    store i32 7, ptr %[[ADDR]], align 4
+
 // OGCG-LABEL: define {{.*}} void @_Z18assign_to_co_awaitv(
 // OGCG:       await.ready:
 // OGCG-NEXT:    %[[RES:.*]] = call {{.*}} ptr @_ZN5RefAw12await_resumeEv(
@@ -151,6 +166,12 @@ Task pass_by_reference() {
 // CIR-NEXT:    },)
 // CIR-NEXT:    %[[ADDR:.*]] = cir.load align(8) %[[SLOT]]
 // CIR-NEXT:    cir.call @_Z4bumpRi(%[[ADDR]])
+
+// LLVM-LABEL: define {{.*}} void @_Z17pass_by_referencev(
+// LLVM:         %[[RES:.*]] = call {{.*}} ptr @_ZN5RefAw12await_resumeEv(
+// LLVM-NEXT:    store ptr %[[RES]], ptr %[[SLOT:.*]], align 8
+// LLVM:         %[[ADDR:.*]] = load ptr, ptr %[[SLOT]], align 8
+// LLVM-NEXT:    {{call|invoke}} void @_Z4bumpRi(ptr {{.*}} %[[ADDR]])
 
 // OGCG-LABEL: define {{.*}} void @_Z17pass_by_referencev(
 // OGCG:       await.ready:
@@ -202,6 +223,13 @@ Task member_of_co_await() {
 // CIR-NEXT:    %[[A:.*]] = cir.get_member %[[ADDR]][0] {name = "a"} : !cir.ptr<!rec_S> -> !cir.ptr<!s32i>
 // CIR-NEXT:    cir.store align(4) %{{.*}}, %[[A]] : !s32i, !cir.ptr<!s32i>
 
+// LLVM-LABEL: define {{.*}} void @_Z18member_of_co_awaitv(
+// LLVM:         %[[RES:.*]] = call {{.*}} ptr @_ZN3SAw12await_resumeEv(
+// LLVM-NEXT:    store ptr %[[RES]], ptr %[[SLOT:.*]], align 8
+// LLVM:         %[[ADDR:.*]] = load ptr, ptr %[[SLOT]], align 8
+// LLVM-NEXT:    %[[A:.*]] = getelementptr inbounds nuw %struct.S, ptr %[[ADDR]], i32 0, i32 0
+// LLVM-NEXT:    store i32 8, ptr %[[A]], align 4
+
 // OGCG-LABEL: define {{.*}} void @_Z18member_of_co_awaitv(
 // OGCG:       await.ready:
 // OGCG-NEXT:    %[[RES:.*]] = call {{.*}} ptr @_ZN3SAw12await_resumeEv(
@@ -238,6 +266,15 @@ Task awaiter_with_dtor() {
 // CIR-NEXT:    }
 // CIR-NEXT:    %[[ADDR2:.*]] = cir.load align(8) %[[SPILL]]
 // CIR-NEXT:    cir.store align(8) %[[ADDR2]], %[[R]]
+
+// LLVM-LABEL: define {{.*}} void @_Z17awaiter_with_dtorv(
+// LLVM:         %[[RES:.*]] = call {{.*}} ptr @_ZN6DtorAw12await_resumeEv(
+// LLVM-NEXT:    store ptr %[[RES]], ptr %[[SLOT:.*]], align 8
+// LLVM:         %[[ADDR:.*]] = load ptr, ptr %[[SLOT]], align 8
+// LLVM-NEXT:    store ptr %[[ADDR]], ptr %[[SPILL:.*]], align 8
+// LLVM:         call void @_ZN6DtorAwD1Ev(
+// LLVM:         %[[ADDR2:.*]] = load ptr, ptr %[[SPILL]], align 8
+// LLVM-NEXT:    store ptr %[[ADDR2]], ptr %{{.*}}, align 8
 
 // OGCG-LABEL: define {{.*}} void @_Z17awaiter_with_dtorv(
 // OGCG:       await.ready:
@@ -289,6 +326,12 @@ Task co_yield_co_await() {
 // CIR-NEXT:    %[[ADDR:.*]] = cir.load align(8) %[[SLOT]]
 // CIR-NEXT:    cir.call @_ZN4Task12promise_type11yield_valueERi(%{{.*}}, %[[ADDR]])
 // CIR:         cir.await(yield, ready : {
+
+// LLVM-LABEL: define {{.*}} void @_Z17co_yield_co_awaitv(
+// LLVM:         %[[RES:.*]] = call {{.*}} ptr @_ZN5RefAw12await_resumeEv(
+// LLVM-NEXT:    store ptr %[[RES]], ptr %[[SLOT:.*]], align 8
+// LLVM:         %[[ADDR:.*]] = load ptr, ptr %[[SLOT]], align 8
+// LLVM-NEXT:    call void @_ZN4Task12promise_type11yield_valueERi(ptr {{.*}}, ptr {{.*}} %[[ADDR]])
 
 // OGCG-LABEL: define {{.*}} void @_Z17co_yield_co_awaitv(
 // OGCG:       await.ready:
@@ -375,6 +418,13 @@ RefSuspendTask initial_and_final_suspend() {
 // CIR-NEXT:        cir.yield
 // CIR-NEXT:      },)
 // CIR-NEXT:      %{{.*}} = cir.load align(8) %[[FINAL_SLOT]]
+
+// LLVM-LABEL: define {{.*}} @_Z25initial_and_final_suspendv(
+// LLVM-NOEH:    call {{.*}} ptr @_ZN9InitRefAw12await_resumeEv(
+// LLVM-EH:      invoke {{.*}} ptr @_ZN9InitRefAw12await_resumeEv(
+// LLVM:         call void @_ZN9InitRefAwD1Ev(
+// LLVM:         %[[RES:.*]] = call {{.*}} ptr @_ZN10FinalRefAw12await_resumeEv(
+// LLVM-NEXT:    store ptr %[[RES]], ptr %{{.*}}, align 8
 
 // OGCG-LABEL: define {{.*}} @_Z25initial_and_final_suspendv(
 // OGCG:       init.ready:

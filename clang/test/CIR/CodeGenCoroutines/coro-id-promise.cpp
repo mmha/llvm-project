@@ -1,10 +1,9 @@
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fclangir -emit-cir %s -o %t.cir
 // RUN: FileCheck --input-file=%t.cir %s -check-prefix=CIR
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -fclangir -emit-llvm -disable-llvm-passes %s -o %t-cir.ll
+// RUN: FileCheck --input-file=%t-cir.ll %s -check-prefix=LLVM
 // RUN: %clang_cc1 -std=c++20 -triple x86_64-unknown-linux-gnu -emit-llvm -disable-llvm-passes %s -o %t.ll
-// RUN: FileCheck --input-file=%t.ll %s -check-prefix=OGCG
-
-// FIXME: There is no FlattenCFG or LLVM lowering for cir.coroutine yet, so
-// there is no LLVM-through-CIR run.
+// RUN: FileCheck --input-file=%t.ll %s -check-prefix=LLVM
 
 // The promise operand of coro.id names the promise alloca, as in classic
 // CodeGen. The coro.id is created before the promise is emitted, so the operand
@@ -36,9 +35,9 @@ Task plain() { co_return; }
 // CIR:         cir.coroutine initialSuspend : {
 // CIR:           cir.call @_ZN4Task12promise_type17get_return_objectEv(%[[PROMISE]])
 
-// OGCG-LABEL: define {{.*}} @_Z5plainv(
-// OGCG:         %[[PROMISE:.*]] = alloca %"struct.Task::promise_type"
-// OGCG:         call token @llvm.coro.id(i32 16, ptr %[[PROMISE]], ptr null, ptr null)
+// LLVM-LABEL: define {{.*}} @_Z5plainv(
+// LLVM:         %[[PROMISE:.*]] = alloca %"struct.Task::promise_type"
+// LLVM:         call token @llvm.coro.id(i32 16, ptr %[[PROMISE]], ptr null, ptr null)
 
 // A promise constructor that takes the coroutine's parameters is passed the
 // parameter copies, which are emitted before the promise.
@@ -66,9 +65,9 @@ ParamTask with_param(int n) { co_return; }
 // CIR-NEXT:      %[[N:.*]] = cir.load {{.*}} %[[N_COPY]] : !cir.ptr<!s32i>, !s32i
 // CIR-NEXT:      cir.call @_ZN9ParamTask12promise_typeC1Ei(%[[PROMISE]], %[[N]])
 
-// OGCG-LABEL: define {{.*}} @_Z10with_parami(
-// OGCG:         %[[PROMISE:.*]] = alloca %"struct.ParamTask::promise_type"
-// OGCG:         call token @llvm.coro.id(i32 16, ptr %[[PROMISE]], ptr null, ptr null)
+// LLVM-LABEL: define {{.*}} @_Z10with_parami(
+// LLVM:         %[[PROMISE:.*]] = alloca %"struct.ParamTask::promise_type"
+// LLVM:         call token @llvm.coro.id(i32 16, ptr %[[PROMISE]], ptr null, ptr null)
 
 // An over-aligned promise keeps its alignment; coro.id still requests the
 // default operator new alignment, as in classic CodeGen.
@@ -91,9 +90,9 @@ AlignedTask aligned() { co_return; }
 // CIR-NEXT:    %[[PROMISE_VOID:.*]] = cir.cast bitcast %[[PROMISE]] : !cir.ptr<!rec_AlignedTask3A3Apromise_type> -> !cir.ptr<!void>
 // CIR-NEXT:    %{{.*}} = cir.coro.intrinsic.id(%[[ALIGN]], %[[PROMISE_VOID]], %{{.*}}, %{{.*}})
 
-// OGCG-LABEL: define {{.*}} @_Z7alignedv(
-// OGCG:         %[[PROMISE:.*]] = alloca %"struct.AlignedTask::promise_type", align 64
-// OGCG:         call token @llvm.coro.id(i32 16, ptr %[[PROMISE]], ptr null, ptr null)
+// LLVM-LABEL: define {{.*}} @_Z7alignedv(
+// LLVM:         %[[PROMISE:.*]] = alloca %"struct.AlignedTask::promise_type", align 64
+// LLVM:         call token @llvm.coro.id(i32 16, ptr %[[PROMISE]], ptr null, ptr null)
 
 // Member function and lambda coroutines.
 
@@ -108,9 +107,9 @@ Task S::member() { co_return; }
 // CIR:         %[[PROMISE_VOID:.*]] = cir.cast bitcast %[[PROMISE]] : !cir.ptr<!rec_Task3A3Apromise_type> -> !cir.ptr<!void>
 // CIR-NEXT:    %{{.*}} = cir.coro.intrinsic.id(%{{.*}}, %[[PROMISE_VOID]], %{{.*}}, %{{.*}})
 
-// OGCG-LABEL: define {{.*}} @_ZN1S6memberEv(
-// OGCG:         %[[PROMISE:.*]] = alloca %"struct.Task::promise_type"
-// OGCG:         call token @llvm.coro.id(i32 16, ptr %[[PROMISE]], ptr null, ptr null)
+// LLVM-LABEL: define {{.*}} @_ZN1S6memberEv(
+// LLVM:         %[[PROMISE:.*]] = alloca %"struct.Task::promise_type"
+// LLVM:         call token @llvm.coro.id(i32 16, ptr %[[PROMISE]], ptr null, ptr null)
 
 void use_lambda() {
   auto l = []() -> Task { co_return; };
@@ -122,6 +121,6 @@ void use_lambda() {
 // CIR:         %[[PROMISE_VOID:.*]] = cir.cast bitcast %[[PROMISE]] : !cir.ptr<!rec_Task3A3Apromise_type> -> !cir.ptr<!void>
 // CIR-NEXT:    %{{.*}} = cir.coro.intrinsic.id(%{{.*}}, %[[PROMISE_VOID]], %{{.*}}, %{{.*}})
 
-// OGCG-LABEL: define {{.*}} @"_ZZ10use_lambdavENK3$_0clEv"(
-// OGCG:         %[[PROMISE:.*]] = alloca %"struct.Task::promise_type"
-// OGCG:         call token @llvm.coro.id(i32 16, ptr %[[PROMISE]], ptr null, ptr null)
+// LLVM-LABEL: define {{.*}} @"_ZZ10use_lambdavENK3$_0clEv"(
+// LLVM:         %[[PROMISE:.*]] = alloca %"struct.Task::promise_type"
+// LLVM:         call token @llvm.coro.id(i32 16, ptr %[[PROMISE]], ptr null, ptr null)
