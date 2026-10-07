@@ -4893,6 +4893,13 @@ mlir::LogicalResult CIRToLLVMResumeFlatOpLowering::matchAndRewrite(
 mlir::LogicalResult CIRToLLVMEhTypeIdOpLowering::matchAndRewrite(
     cir::EhTypeIdOp op, OpAdaptor adaptor,
     mlir::ConversionPatternRewriter &rewriter) const {
+  // OpenMPIRBuilder outlines an omp.parallel region with CodeExtractor, which
+  // does not extract blocks that call llvm.eh.typeid.for (llvm.org/PR39545),
+  // so the translation to LLVM IR would fail an assertion.
+  if (op->getParentOfType<mlir::omp::ParallelOp>())
+    return op.emitError("catching a specific exception type inside an OpenMP "
+                        "parallel region is not yet implemented");
+
   mlir::Value addrOp = mlir::LLVM::AddressOfOp::create(
       rewriter, op.getLoc(),
       mlir::LLVM::LLVMPointerType::get(rewriter.getContext()),

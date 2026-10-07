@@ -142,7 +142,7 @@ private:
   void ensureCxaThrowDecl(mlir::Location loc);
   void ensureCxaRethrowDecl(mlir::Location loc);
   void ensureCxaCallUnexpectedDecl(mlir::Location loc);
-  mlir::Block *buildTerminateBlock(cir::FuncOp funcOp, mlir::Location loc);
+  mlir::Block *buildTerminateBlock(mlir::Region &region, mlir::Location loc);
   mlir::FailureOr<cir::FuncOp>
   resolveCatchCopyThunk(cir::ConstructCatchParamOp op);
   mlir::LogicalResult lowerFunc(cir::FuncOp funcOp);
@@ -296,13 +296,15 @@ void ItaniumEHLowering::ensureCxaCallUnexpectedDecl(mlir::Location loc) {
       mod, loc, "__cxa_call_unexpected", unexpectedFuncTy);
 }
 
-/// Create a terminate landing pad block at the end of the specified function.
-mlir::Block *ItaniumEHLowering::buildTerminateBlock(cir::FuncOp funcOp,
+/// Create a terminate landing pad block at the end of \p region. Branches
+/// cannot leave their region, so this must be the region of the calls that
+/// unwind to the block, which is not the function body when they are nested
+/// in an op such as omp.parallel.
+mlir::Block *ItaniumEHLowering::buildTerminateBlock(mlir::Region &region,
                                                     mlir::Location loc) {
   assert(clangCallTerminateFunc &&
          "ensureClangCallTerminate must run before buildTerminateBlock");
-  mlir::Region &body = funcOp.getRegion();
-  mlir::Block *terminateBlock = builder.createBlock(&body, body.end());
+  mlir::Block *terminateBlock = builder.createBlock(&region, region.end());
   auto inflight = cir::EhInflightOp::create(
       builder, loc, /*cleanup=*/false, /*catch_all=*/true,
       /*catch_type_list=*/mlir::ArrayAttr{},
@@ -434,13 +436,13 @@ mlir::LogicalResult ItaniumEHLowering::lowerFunc(cir::FuncOp funcOp) {
   }
 
   // Remove the !cir.eh_token block arguments that were replaced by (ptr, u32)
-  // pairs. Iterate in reverse to preserve argument indices during removal.
-  for (mlir::Block &block : funcOp.getBody()) {
-    for (int i = block.getNumArguments() - 1; i >= 0; --i) {
-      if (mlir::isa<cir::EhTokenType>(block.getArgument(i).getType()))
-        block.eraseArgument(i);
-    }
-  }
+  // pairs. The landing pads can be in nested regions (e.g. omp.parallel), so
+  // visit every block in the function, not only the top-level ones.
+  funcOp.walk([](mlir::Block *block) {
+    block->eraseArguments([](mlir::BlockArgument arg) {
+      return mlir::isa<cir::EhTokenType>(arg.getType());
+    });
+  });
 
   // Lower any cir.init_catch_param ops in this function. These materialize
   // the catch parameter local from the (already lowered) begin_catch result,
@@ -887,6 +889,10 @@ ItaniumEHLowering::lowerConstructCatchParam(cir::ConstructCatchParamOp op,
       if (!callOp.getNothrow())
         throwingCalls.push_back(callOp);
   }
+  // The copy was cloned in place of the construct_catch_param, so its calls
+  // are in that op's region, which is not the function body when the catch
+  // is nested in an op such as omp.parallel.
+  mlir::Region &region = *op->getParentRegion();
   op.erase();
 
   if (throwingCalls.empty())
@@ -894,14 +900,11 @@ ItaniumEHLowering::lowerConstructCatchParam(cir::ConstructCatchParamOp op,
 
   // All calls in the copy (which is usually just a single call) need to
   // unwind to a terminate block if it throws an exception.
+  mlir::Block *terminateBlock =
+      buildTerminateBlock(region, throwingCalls.front().getLoc());
   mlir::IRRewriter rewriter(builder);
-  mlir::Block *terminateBlock = nullptr;
-  for (cir::CallOp call : throwingCalls) {
-    if (!terminateBlock)
-      terminateBlock = buildTerminateBlock(call->getParentOfType<cir::FuncOp>(),
-                                           call.getLoc());
+  for (cir::CallOp call : throwingCalls)
     cir::replaceCallWithTryCall(call, terminateBlock, call.getLoc(), rewriter);
-  }
   return mlir::success();
 }
 

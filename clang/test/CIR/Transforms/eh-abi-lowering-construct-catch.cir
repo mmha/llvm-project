@@ -13,8 +13,8 @@
 //     thunk's body in place; any potentially-throwing `cir.call` becomes a
 //     `cir.try_call` whose unwind path runs `__clang_call_terminate`
 //     (Itanium's terminate scope around the catch-parameter copy). The
-//     terminate block is appended at the end of the function as a cold
-//     landing pad.
+//     terminate block is appended at the end of the enclosing region (the
+//     function body here) as a cold landing pad.
 //   - Drop any catch-copy thunks that end up uncalled after lowering.
 
 !s8i = !cir.int<s, 8>
@@ -111,8 +111,8 @@ cir.func @test_basic_construct_catch() {
 // CHECK:       ^[[RETURN]]:
 // CHECK:         cir.return
 //
-// Terminate scope appended at the end of the function: control reaches it
-// only if the catch-parameter copy throws.
+// Terminate scope appended at the end of the enclosing region, here the
+// function body: control reaches it only if the catch-parameter copy throws.
 // CHECK:       ^[[TERMINATE]]:
 // CHECK:         %[[T_EXN:.*]], %{{.*}} = cir.eh.inflight_exception catch_all
 // CHECK:         cir.call @__clang_call_terminate(%[[T_EXN]]){{.*}}noreturn

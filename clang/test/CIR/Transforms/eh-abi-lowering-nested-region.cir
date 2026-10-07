@@ -1,0 +1,176 @@
+// RUN: cir-opt %s -cir-eh-abi-lowering -o %t.cir
+// RUN: FileCheck --input-file=%t.cir %s --implicit-check-not='!cir.eh_token'
+
+// Test the Itanium EH ABI lowering of landing pads in a nested region, here
+// the region of an omp.parallel op. The !cir.eh_token block arguments there
+// must be replaced like those in the function body, and the terminate landing
+// pad of a catch-parameter copy must be in the region of the copy, since a
+// branch cannot leave its region.
+
+!s8i = !cir.int<s, 8>
+!u8i = !cir.int<u, 8>
+!void = !cir.void
+!rec_E = !cir.struct<"E" {pad !u8i}>
+!rec_anon_struct = !cir.struct<{data !cir.ptr<!u8i>, data !cir.ptr<!u8i>}>
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu"} {
+
+cir.global "private" external @_ZTVN10__cxxabiv117__class_type_infoE
+    : !cir.ptr<!cir.ptr<!u8i>>
+cir.global linkonce_odr @_ZTS1E
+    = #cir.const_array<"1E" : !cir.array<!s8i x 2>, trailing_zeros>
+    : !cir.array<!s8i x 3>
+cir.global constant linkonce_odr @_ZTI1E
+    = #cir.typeinfo<{
+        #cir.global_view<@_ZTVN10__cxxabiv117__class_type_infoE, [2 : i32]>
+            : !cir.ptr<!u8i>,
+        #cir.global_view<@_ZTS1E> : !cir.ptr<!u8i>}>
+    : !rec_anon_struct
+
+cir.func private @_Z8mayThrowv()
+cir.func private @_ZN1EC1ERKS_(!cir.ptr<!rec_E>, !cir.ptr<!rec_E>)
+cir.func private @_ZN1ED1Ev(!cir.ptr<!rec_E>) attributes {nothrow}
+
+cir.func linkonce_odr hidden @__clang_cir_catch_copy__ZTS1E(
+    %arg0: !cir.ptr<!rec_E>, %arg1: !cir.ptr<!rec_E>)
+    attributes {cir.eh.catch_copy_thunk} {
+  cir.call @_ZN1EC1ERKS_(%arg0, %arg1)
+      : (!cir.ptr<!rec_E>, !cir.ptr<!rec_E>) -> ()
+  cir.return
+}
+
+// Case 1: catch (...) inside omp.parallel.
+
+cir.func @test_catch_all_in_parallel() {
+  omp.parallel {
+    cir.try_call @_Z8mayThrowv() ^bb1, ^bb2 : () -> ()
+  ^bb1:
+    cir.br ^bb5
+  ^bb2:
+    %0 = cir.eh.initiate : !cir.eh_token
+    cir.br ^bb3(%0 : !cir.eh_token)
+  ^bb3(%eh_token: !cir.eh_token):
+    cir.eh.dispatch %eh_token : !cir.eh_token [
+      catch_all : ^bb4
+    ]
+  ^bb4(%eh_token.1: !cir.eh_token):
+    %ct, %exn = cir.begin_catch %eh_token.1
+        : !cir.eh_token -> (!cir.catch_token, !cir.ptr<!void>)
+    cir.end_catch %ct : !cir.catch_token
+    cir.br ^bb5
+  ^bb5:
+    omp.terminator
+  }
+  cir.return
+}
+
+// CHECK-LABEL: cir.func @test_catch_all_in_parallel()
+// CHECK-SAME:    personality(@__gxx_personality_v0)
+// CHECK:         omp.parallel {
+// CHECK:           cir.try_call @_Z8mayThrowv() ^[[NORMAL:bb[0-9]+]], ^[[UNWIND:bb[0-9]+]]
+// CHECK:         ^[[NORMAL]]:
+// CHECK:           cir.br ^[[EXIT:bb[0-9]+]]
+// CHECK:         ^[[UNWIND]]:
+// CHECK:           %[[EXN:.*]], %[[TID:.*]] = cir.eh.inflight_exception catch_all
+// CHECK:           cir.br ^[[DISPATCH:bb[0-9]+]](%[[EXN]], %[[TID]] : !cir.ptr<!void>, !u32i)
+// CHECK:         ^[[DISPATCH]](%[[D_EXN:.*]]: !cir.ptr<!void>, %[[D_TID:.*]]: !u32i):
+// CHECK:           cir.br ^[[CATCH:bb[0-9]+]](%[[D_EXN]], %[[D_TID]] : !cir.ptr<!void>, !u32i)
+// CHECK:         ^[[CATCH]](%[[C_EXN:.*]]: !cir.ptr<!void>, %{{.*}}: !u32i):
+// CHECK:           cir.call @__cxa_begin_catch(%[[C_EXN]])
+// CHECK:           cir.call @__cxa_end_catch()
+// CHECK:           cir.br ^[[EXIT]]
+// CHECK:         ^[[EXIT]]:
+// CHECK-NEXT:      omp.terminator
+// CHECK-NEXT:    }
+// CHECK-NEXT:    cir.return
+
+// Case 2: catch (E) with a throwing copy, once in the function body and once
+// inside omp.parallel. Each copy unwinds to a terminate block in its own
+// region.
+
+cir.func @test_catch_copy_in_body_and_parallel() {
+  %0 = cir.alloca "e" align(1) : !cir.ptr<!rec_E>
+  cir.try_call @_Z8mayThrowv() ^bb1, ^bb2 : () -> ()
+^bb1:
+  cir.br ^bb6
+^bb2:
+  %1 = cir.eh.initiate : !cir.eh_token
+  cir.br ^bb3(%1 : !cir.eh_token)
+^bb3(%eh_token: !cir.eh_token):
+  cir.eh.dispatch %eh_token : !cir.eh_token [
+    catch(#cir.global_view<@_ZTI1E> : !cir.ptr<!u8i>) : ^bb4,
+    unwind : ^bb5
+  ]
+^bb4(%eh_token.1: !cir.eh_token):
+  cir.construct_catch_param non_trivial_copy %eh_token.1 to %0
+      using @__clang_cir_catch_copy__ZTS1E : !cir.ptr<!rec_E>
+  %ct, %exn = cir.begin_catch %eh_token.1
+      : !cir.eh_token -> (!cir.catch_token, !cir.ptr<!void>)
+  cir.call @_ZN1ED1Ev(%0) nothrow : (!cir.ptr<!rec_E>) -> ()
+  cir.end_catch %ct : !cir.catch_token
+  cir.br ^bb6
+^bb5(%eh_token.2: !cir.eh_token):
+  cir.resume %eh_token.2 : !cir.eh_token
+^bb6:
+  omp.parallel {
+    %2 = cir.alloca "e" align(1) : !cir.ptr<!rec_E>
+    cir.try_call @_Z8mayThrowv() ^bb1, ^bb2 : () -> ()
+  ^bb1:
+    cir.br ^bb6
+  ^bb2:
+    %3 = cir.eh.initiate : !cir.eh_token
+    cir.br ^bb3(%3 : !cir.eh_token)
+  ^bb3(%eh_token.3: !cir.eh_token):
+    cir.eh.dispatch %eh_token.3 : !cir.eh_token [
+      catch(#cir.global_view<@_ZTI1E> : !cir.ptr<!u8i>) : ^bb4,
+      unwind : ^bb5
+    ]
+  ^bb4(%eh_token.4: !cir.eh_token):
+    cir.construct_catch_param non_trivial_copy %eh_token.4 to %2
+        using @__clang_cir_catch_copy__ZTS1E : !cir.ptr<!rec_E>
+    %ct.1, %exn.1 = cir.begin_catch %eh_token.4
+        : !cir.eh_token -> (!cir.catch_token, !cir.ptr<!void>)
+    cir.call @_ZN1ED1Ev(%2) nothrow : (!cir.ptr<!rec_E>) -> ()
+    cir.end_catch %ct.1 : !cir.catch_token
+    cir.br ^bb6
+  ^bb5(%eh_token.5: !cir.eh_token):
+    cir.resume %eh_token.5 : !cir.eh_token
+  ^bb6:
+    omp.terminator
+  }
+  cir.return
+}
+
+// CHECK-LABEL: cir.func @test_catch_copy_in_body_and_parallel()
+// CHECK-SAME:    personality(@__gxx_personality_v0)
+// CHECK:         %[[E:.*]] = cir.alloca "e"
+// CHECK:         cir.try_call @_Z8mayThrowv() ^{{bb[0-9]+}}, ^[[UNWIND:bb[0-9]+]]
+// CHECK:       ^[[UNWIND]]:
+// CHECK:         cir.eh.inflight_exception [@_ZTI1E]
+// CHECK:         cir.call @__cxa_get_exception_ptr
+// CHECK:         cir.try_call @_ZN1EC1ERKS_(%[[E]], %{{.*}}) ^{{bb[0-9]+}}, ^[[TERMINATE:bb[0-9]+]]
+// CHECK:         cir.resume.flat
+//
+// CHECK:         omp.parallel {
+// CHECK:           %[[P_E:.*]] = cir.alloca "e"
+// CHECK:           cir.try_call @_Z8mayThrowv() ^{{bb[0-9]+}}, ^[[P_UNWIND:bb[0-9]+]]
+// CHECK:         ^[[P_UNWIND]]:
+// CHECK:           cir.eh.inflight_exception [@_ZTI1E]
+// CHECK:           cir.call @__cxa_get_exception_ptr
+// CHECK:           cir.try_call @_ZN1EC1ERKS_(%[[P_E]], %{{.*}}) ^{{bb[0-9]+}}, ^[[P_TERMINATE:bb[0-9]+]]
+// CHECK:           cir.resume.flat
+// CHECK:           omp.terminator
+// CHECK:         ^[[P_TERMINATE]]:
+// CHECK-NEXT:      %[[P_T_EXN:.*]], %{{.*}} = cir.eh.inflight_exception catch_all
+// CHECK-NEXT:      cir.call @__clang_call_terminate(%[[P_T_EXN]]) nothrow {noreturn}
+// CHECK-NEXT:      cir.unreachable
+// CHECK-NEXT:    }
+// CHECK-NEXT:    cir.return
+//
+// CHECK:       ^[[TERMINATE]]:
+// CHECK-NEXT:    %[[T_EXN:.*]], %{{.*}} = cir.eh.inflight_exception catch_all
+// CHECK-NEXT:    cir.call @__clang_call_terminate(%[[T_EXN]]) nothrow {noreturn}
+// CHECK-NEXT:    cir.unreachable
+// CHECK-NEXT:  }
+
+}
