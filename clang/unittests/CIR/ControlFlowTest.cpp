@@ -648,10 +648,12 @@ TEST_F(CIRControlFlowTest, CoroutineOp) {
   RegionBranchTerminatorOpInterface initTerm =
       getTerminator(coroOp.getInitialSuspend());
   ASSERT_TRUE(initTerm);
-  expectSuccessors(coroOp, RegionBranchPoint(initTerm),
-                   {&coroOp.getBody(), &coroOp.getExit()});
-  expectTerminatorSuccessors(coroOp.getInitialSuspend(),
-                             {&coroOp.getBody(), &coroOp.getExit()});
+  expectSuccessors(
+      coroOp, RegionBranchPoint(initTerm),
+      {&coroOp.getBody(), &coroOp.getExit(), &coroOp.getDestroy()});
+  expectTerminatorSuccessors(
+      coroOp.getInitialSuspend(),
+      {&coroOp.getBody(), &coroOp.getExit(), &coroOp.getDestroy()});
 
   // body: falls through to final_suspend, exits directly on a plain
   // suspend, or reaches destroy
@@ -664,10 +666,9 @@ TEST_F(CIRControlFlowTest, CoroutineOp) {
       coroOp.getBody(),
       {&coroOp.getFinalSuspend(), &coroOp.getExit(), &coroOp.getDestroy()});
 
-  // final_suspend: exits or destroy.
-  // Should always be destroy in practice, a real suspend after
-  // final_suspend is UB, so the exit edge is never actually taken by a
-  // valid program. Keeping exit here anyway for now.
+  // final_suspend: reaches destroy when control flows off the end of the
+  // coroutine, or exits when the coroutine suspends at its final suspend
+  // point and stays suspended until destroy() is called.
   RegionBranchTerminatorOpInterface finalTerm =
       getTerminator(coroOp.getFinalSuspend());
   ASSERT_TRUE(finalTerm);
@@ -741,10 +742,23 @@ TEST_F(CIRControlFlowTest, AwaitOp) {
   expectTerminatorSuccessors(awaitOp.getReady(),
                              {&awaitOp.getResume(), &awaitOp.getSuspend()});
 
-  expectTerminatorSuccessors(awaitOp.getSuspend(), {nullptr});
+  // A suspended coroutine continues in resume once it is resumed. The parent
+  // only records that the cir.await can be left without running resume: the
+  // transfers to the enclosing cir.coroutine's exit or destroy region skip the
+  // ops after the cir.await and cannot be expressed by the interface.
+  expectTerminatorSuccessors(awaitOp.getSuspend(),
+                             {&awaitOp.getResume(), nullptr});
   expectTerminatorSuccessors(awaitOp.getResume(), {nullptr});
 
-  EXPECT_FALSE(asRegionBranch(awaitOp).hasLoop());
+  // There is no cycle (see isRepetitiveRegion below), but MLIR's
+  // RegionBranchOpInterface::hasLoop() reports any region reached twice as a
+  // loop, and resume is reachable both directly from ready and through
+  // suspend.
+  RegionBranchOpInterface awaitBranch = asRegionBranch(awaitOp);
+  EXPECT_FALSE(awaitBranch.isRepetitiveRegion(0));
+  EXPECT_FALSE(awaitBranch.isRepetitiveRegion(1));
+  EXPECT_FALSE(awaitBranch.isRepetitiveRegion(2));
+  EXPECT_TRUE(awaitBranch.hasLoop());
 
   verifyControlFlowInterfaceConsistency(awaitOp);
 }

@@ -3611,7 +3611,22 @@ void cir::AwaitOp::getSuccessorRegions(
     return;
   }
 
-  // Branching from suspend or resume: exit to the parent operation.
+  // Branching from suspend: the cir.coro.suspend_point terminating it
+  // continues in resume once the coroutine is resumed. A coroutine that stays
+  // suspended or is destroyed instead transfers directly to the enclosing
+  // cir.coroutine's exit or destroy region and skips everything after this
+  // cir.await. RegionBranchOpInterface cannot express such a non-local
+  // transfer: those regions are only reachable at region granularity, through
+  // the cir.coroutine's edges out of the region that holds this op. The parent
+  // successor only records that the cir.await can be left without running
+  // resume. The model is for reachability only; it is not path-accurate.
+  if (&getSuspend() == parentRegion) {
+    regions.emplace_back(&getResume());
+    regions.emplace_back(getOperation());
+    return;
+  }
+
+  // Branching from resume: exit to the parent operation.
   regions.emplace_back(getOperation());
 }
 
@@ -3696,11 +3711,14 @@ void cir::CoroutineOp::getSuccessorRegions(
       point.getTerminatorPredecessorOrNull()->getParentRegion();
 
   // initial_suspend either falls into body (resumed, or never actually
-  // suspended because await_ready() was true) or exits directly, a plain
-  // suspend here means nobody has resumed yet, so we just return to caller.
+  // suspended because await_ready() was true), exits directly (a plain
+  // suspend here means nobody has resumed yet, so we just return to the
+  // caller), or reaches destroy when the coroutine is destroyed while
+  // suspended at its initial suspend point.
   if (parent == &getInitialSuspend()) {
     regions.emplace_back(&getBody());
     regions.emplace_back(&getExit());
+    regions.emplace_back(&getDestroy());
     return;
   }
 
@@ -3714,14 +3732,14 @@ void cir::CoroutineOp::getSuccessorRegions(
     return;
   }
 
-  // final_suspend's only live edge in valid programs is destroy resuming
-  // past the final suspend is UB. The ready-immediately edge to exit is
-  // kept for structural symmetry with the other two suspend regions even
-  // though it's effectively dead.
+  // final_suspend reaches destroy when control flows off the end of the
+  // coroutine (the final await does not suspend), and exits when the coroutine
+  // suspends at its final suspend point. The latter is common: the coroutine
+  // stays suspended until destroy() is called, which then reaches destroy.
+  // Only resuming it through its handle is undefined behavior.
   if (parent == &getFinalSuspend()) {
-    regions.emplace_back(
-        &getDestroy());               // the only real exit from final_suspend
-    regions.emplace_back(&getExit()); // ready==true edge, rarely taken
+    regions.emplace_back(&getDestroy());
+    regions.emplace_back(&getExit());
     return;
   }
 

@@ -4824,8 +4824,9 @@ def CIR_CoroutineOp : CIR_Op<"coroutine", [
 
   let summary = "Groups a coroutine's structured suspend/resume/destroy control flow";
   let description = [{
-    `cir.coroutine` is an op consisting of seven regions: `initial_suspend`,
-    `body`, `final_suspend`, grp (TODO),`unwind` (TODO), `destroy`, and`exit`.
+    `cir.coroutine` is an op consisting of five regions: `initial_suspend`,
+    `body`, `final_suspend`, `destroy`, and `exit`. The `gro` and `unwind`
+    regions are TODO.
 
     - `initial_suspend`: the coroutine ramp/setup region. Its `cir.await` marked
       `init` is the ramp boundary: the coroutine frame and its associated state
@@ -4843,11 +4844,10 @@ def CIR_CoroutineOp : CIR_Op<"coroutine", [
       points and introduce structured control flow that transfers
       execution to `final_suspend`.
 
-    - `final_suspend`: exactly one `cir.await`, marked `final`. Nothing
-      else. Corresponds to `co_await promise.final_suspend()`. Resuming
-      past this point is undefined behavior in valid programs, so its
-      `resume` edge is expected to be dead in practice, but is kept for
-      structural symmetry with the other two suspend regions.
+    - `final_suspend`: at most one `cir.await`, marked `final`.
+      Corresponds to `co_await promise.final_suspend()`. Suspending at this
+      final suspend point is valid: the coroutine stays suspended until it is
+      destroyed. Resuming it through its handle is undefined behavior.
 
     - `gro`: TODO.
 
@@ -4855,10 +4855,11 @@ def CIR_CoroutineOp : CIR_Op<"coroutine", [
 
     - `destroy`: destroys the coroutine state: the promise, then the
       parameter copies, then the coroutine frame (`coro.free` + `delete`).
-      Reached by an explicit `destroy()` call on a suspended handle, or by
-      normal completion through `final_suspend`, and falls through to
-      `exit`. It runs the destructors unconditionally, so an exception must
-      not reach it. Exceptional exits are not modeled yet (see `unwind`).
+      Reached by an explicit `destroy()` call on a handle suspended at any
+      suspend point, including the initial and final ones, or by normal
+      completion through `final_suspend`, and falls through to `exit`. It
+      runs the destructors unconditionally, so an exception must not reach
+      it. Exceptional exits are not modeled yet (see `unwind`).
 
     - `exit`: the shared return-to-caller path. Reached directly from any
       suspend point that isn't being destroyed (the coroutine is just
@@ -5002,10 +5003,9 @@ def CIR_CoReturnOp : CIR_Op<"co_return", [
 ]> {
   let summary = "Coroutine return operation";
   let description = [{
-    The `cir.co_return` operation models a coroutine return point inside a
-    `cir.coro.body` region.
-    This operation is expected to appear only within a `cir.coro.body` region,
-    but it may be nested within other operations or regions inside that body.
+    The `cir.co_return` operation models a coroutine return point inside the
+    `body` region of a `cir.coroutine`. It may be nested within other
+    operations or regions inside that body.
   }];
 
   let assemblyFormat = [{
@@ -5214,8 +5214,15 @@ def CIR_CoroSuspendPoint : CIR_Op<"coro.suspend_point", [
   let summary = "Marks the point where a coroutine actually suspends";
   let description = [{
     Terminates the `suspend` region of a `cir.await`. It has no explicit
-    successors; the destination is determined by `CoroutineOp`
-    according to how the suspended coroutine is subsequently handled:
+    successors; the destination depends on how the suspended coroutine is
+    subsequently handled. Its region successors are the `cir.await`'s
+    `resume` region and the parent `cir.await`, which only records that the
+    `cir.await` can be left without running `resume`. The transfers to the
+    enclosing `cir.coroutine`'s `exit` and `destroy` regions skip the
+    operations after the `cir.await`. `RegionBranchOpInterface` cannot
+    express them, and they are only modeled at region granularity, by the
+    `cir.coroutine`'s own edges. The model is for reachability only. The
+    actual destinations are:
 
     - resume: continues execution through the `cir.await`'s `resume` region
       when the coroutine handle is resumed.
