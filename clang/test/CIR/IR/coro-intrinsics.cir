@@ -71,6 +71,30 @@ module {
   // CHECK: %[[FALSE:.*]] = cir.const #false
   // CHECK: cir.coro.intrinsic.suspend(%[[SAVE]], %[[FALSE]]) : (token, !cir.bool) -> !u8i
 
+  // The await_suspend wrapper calls that may unwind.
+  // CHECK-LABEL: cir.func @try_await_suspend
+  cir.func @try_await_suspend(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) -> !cir.bool {
+    cir.coro.intrinsic.try_await.suspend void(%awaiter, %frame, @wrapper_void) ^bb1, ^bb4 : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+  ^bb1:
+    cir.coro.intrinsic.try_await.suspend handle(%awaiter, %frame, @wrapper_handle) ^bb2, ^bb4 : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+  ^bb2:
+    %0 = cir.coro.intrinsic.try_await.suspend bool(%awaiter, %frame, @wrapper_bool) ^bb3, ^bb4 : (!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+  ^bb3:
+    cir.return %0 : !cir.bool
+  ^bb4:
+    cir.unreachable
+  }
+  // CHECK-SAME: (%[[AWAITER:.*]]: !cir.ptr<!void>, %[[FRAME:.*]]: !cir.ptr<!void>)
+  // CHECK: cir.coro.intrinsic.try_await.suspend void(%[[AWAITER]], %[[FRAME]], @wrapper_void) ^[[BB1:bb[0-9]+]], ^[[UNWIND:bb[0-9]+]] : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+  // CHECK: ^[[BB1]]:
+  // CHECK: cir.coro.intrinsic.try_await.suspend handle(%[[AWAITER]], %[[FRAME]], @wrapper_handle) ^[[BB2:bb[0-9]+]], ^[[UNWIND]] : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+  // CHECK: ^[[BB2]]:
+  // CHECK: %[[SUSPEND:.*]] = cir.coro.intrinsic.try_await.suspend bool(%[[AWAITER]], %[[FRAME]], @wrapper_bool) ^[[BB3:bb[0-9]+]], ^[[UNWIND]] : (!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+  // CHECK: ^[[BB3]]:
+  // CHECK: cir.return %[[SUSPEND]] : !cir.bool
+  // CHECK: ^[[UNWIND]]:
+  // CHECK: cir.unreachable
+
   // CHECK-LABEL: cir.func @is_in_ramp
   cir.func @is_in_ramp() -> !cir.bool {
     %0 = cir.coro.intrinsic.is_in_ramp() : () -> !cir.bool

@@ -3879,9 +3879,10 @@ LogicalResult cir::CoroutineOp::verify() {
 // CoroAwaitSuspend{Void,Bool,Handle}Op
 //===----------------------------------------------------------------------===//
 
-// Returns the wrapper function of a `cir.coro.intrinsic.await.suspend.*`
-// operation if the coroutine split can call it with the operation's awaiter
-// and frame operands. Emits an error and returns null otherwise.
+// Returns the wrapper function of a `cir.coro.intrinsic.await.suspend.*` or
+// `cir.coro.intrinsic.try_await.suspend` operation if the coroutine split can
+// call it with the operation's awaiter and frame operands. Emits an error and
+// returns null otherwise.
 template <typename AwaitSuspendOp>
 static cir::FuncOp
 getVerifiedAwaitSuspendWrapper(AwaitSuspendOp op,
@@ -3925,15 +3926,55 @@ LogicalResult cir::CoroAwaitSuspendBoolOp::verifySymbolUses(
   return success();
 }
 
+// Checks that the wrapper of a `cir.coro.intrinsic.await.suspend.handle` or of
+// a `cir.coro.intrinsic.try_await.suspend` of the `handle` kind returns the
+// address of a coroutine handle.
+template <typename AwaitSuspendOp>
+static LogicalResult verifyHandleWrapperResult(AwaitSuspendOp op,
+                                               cir::FuncOp fn) {
+  auto ptrTy = dyn_cast<cir::PointerType>(fn.getFunctionType().getReturnType());
+  if (!ptrTy || !isa<cir::VoidType>(ptrTy.getPointee()))
+    return op.emitOpError("wrapper must return a pointer to void");
+  return success();
+}
+
 LogicalResult cir::CoroAwaitSuspendHandleOp::verifySymbolUses(
     SymbolTableCollection &symbolTable) {
   cir::FuncOp fn = getVerifiedAwaitSuspendWrapper(*this, symbolTable);
   if (!fn)
     return failure();
-  auto ptrTy = dyn_cast<cir::PointerType>(fn.getFunctionType().getReturnType());
-  if (!ptrTy || !isa<cir::VoidType>(ptrTy.getPointee()))
-    return emitOpError("wrapper must return a pointer to void");
+  return verifyHandleWrapperResult(*this, fn);
+}
+
+//===----------------------------------------------------------------------===//
+// CoroTryAwaitSuspendOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult cir::CoroTryAwaitSuspendOp::verify() {
+  bool isBool = getKind() == cir::CoroAwaitSuspendKind::Bool;
+  if (isBool != static_cast<bool>(getResult()))
+    return emitOpError("must have a result if and only if its kind is 'bool'");
   return success();
+}
+
+LogicalResult cir::CoroTryAwaitSuspendOp::verifySymbolUses(
+    SymbolTableCollection &symbolTable) {
+  cir::FuncOp fn = getVerifiedAwaitSuspendWrapper(*this, symbolTable);
+  if (!fn)
+    return failure();
+  switch (getKind()) {
+  case cir::CoroAwaitSuspendKind::Void:
+    if (!fn.getFunctionType().hasVoidReturn())
+      return emitOpError("wrapper must return void");
+    return success();
+  case cir::CoroAwaitSuspendKind::Bool:
+    if (fn.getFunctionType().getReturnType() != getResult().getType())
+      return emitOpError("wrapper must return ") << getResult().getType();
+    return success();
+  case cir::CoroAwaitSuspendKind::Handle:
+    return verifyHandleWrapperResult(*this, fn);
+  }
+  llvm_unreachable("unknown await_suspend kind");
 }
 
 //===----------------------------------------------------------------------===//

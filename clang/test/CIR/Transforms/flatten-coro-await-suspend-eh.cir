@@ -1,0 +1,141 @@
+// RUN: cir-opt %s -cir-flatten-cfg -o %t.cir
+// RUN: FileCheck --input-file=%t.cir %s
+// RUN: cir-opt %s -cir-flatten-cfg -cir-eh-abi-lowering -cir-to-llvm -o %t.mlir
+// RUN: cir-translate -mlir-to-llvmir %t.mlir -o %t.ll
+// RUN: FileCheck --input-file=%t.ll %s -check-prefix=LLVM
+
+// The await_suspend wrapper call of a coroutine suspend point that may throw
+// gets an unwind edge where a cir.call does: the flattening of cleanup scopes
+// and try ops replaces it with cir.coro.intrinsic.try_await.suspend, which
+// lowers to an invoke. One marked nothrow stays a call.
+
+!s32i = !cir.int<s, 32>
+!void = !cir.void
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu"} {
+
+cir.func private @wrapper_void(!cir.ptr<!void>, !cir.ptr<!void>)
+cir.func private @wrapper_bool(!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+cir.func private @wrapper_handle(!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.ptr<!void>
+cir.func private @dtor(!cir.ptr<!s32i>)
+
+// In the body of a cleanup scope with an EH cleanup, the throwing calls unwind
+// to the EH cleanup. The result of the bool form is used in the normal
+// destination.
+cir.func @cleanup_all(%awaiter : !cir.ptr<!void>, %frame : !cir.ptr<!void>, %obj : !cir.ptr<!s32i>, %flag : !cir.ptr<!cir.bool>) {
+  cir.cleanup.scope {
+    cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @wrapper_void) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+    cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @wrapper_void) nothrow : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+    %0 = cir.coro.intrinsic.await.suspend.bool(%awaiter, %frame, @wrapper_bool) : (!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+    cir.store %0, %flag : !cir.bool, !cir.ptr<!cir.bool>
+    cir.yield
+  } cleanup all {
+    cir.call @dtor(%obj) nothrow : (!cir.ptr<!s32i>) -> ()
+    cir.yield
+  }
+  cir.return
+}
+
+// CHECK-LABEL: cir.func @cleanup_all(
+// CHECK-SAME:      %[[AWAITER:[^:]*]]: !cir.ptr<!void>, %[[FRAME:[^:]*]]: !cir.ptr<!void>, %[[OBJ:[^:]*]]: !cir.ptr<!s32i>, %[[FLAG:[^:]*]]: !cir.ptr<!cir.bool>)
+// CHECK:         cir.br ^[[BODY:bb[0-9]+]]
+// CHECK:       ^[[BODY]]:
+// CHECK-NEXT:    cir.coro.intrinsic.try_await.suspend void(%[[AWAITER]], %[[FRAME]], @wrapper_void) ^[[NEXT:bb[0-9]+]], ^[[UNWIND:bb[0-9]+]] : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+// CHECK-NEXT:  ^[[NEXT]]:
+// CHECK-NEXT:    cir.coro.intrinsic.await.suspend.void(%[[AWAITER]], %[[FRAME]], @wrapper_void) nothrow : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+// CHECK-NEXT:    %[[SUSPEND:.*]] = cir.coro.intrinsic.try_await.suspend bool(%[[AWAITER]], %[[FRAME]], @wrapper_bool) ^[[NORMAL:bb[0-9]+]], ^[[UNWIND]] : (!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+// CHECK-NEXT:  ^[[NORMAL]]:
+// CHECK-NEXT:    cir.store %[[SUSPEND]], %[[FLAG]]
+// CHECK-NEXT:    cir.br ^[[NORMAL_CLEANUP:bb[0-9]+]]
+// CHECK:       ^[[NORMAL_CLEANUP]]:
+// CHECK-NEXT:    cir.call @dtor(%[[OBJ]]) nothrow
+// CHECK:       ^[[UNWIND]]:
+// CHECK-NEXT:    %[[EH:.*]] = cir.eh.initiate cleanup : !cir.eh_token
+// CHECK-NEXT:    cir.br ^[[EH_CLEANUP:bb[0-9]+]](%[[EH]] : !cir.eh_token)
+// CHECK:       ^[[EH_CLEANUP]](%[[TOKEN:.*]]: !cir.eh_token):
+// CHECK-NEXT:    %[[CT:.*]] = cir.begin_cleanup %[[TOKEN]]
+// CHECK-NEXT:    cir.call @dtor(%[[OBJ]]) nothrow
+// CHECK-NEXT:    cir.end_cleanup %[[CT]]
+// CHECK-NEXT:    cir.resume %[[TOKEN]] : !cir.eh_token
+
+// LLVM-LABEL: define void @cleanup_all(
+// LLVM-SAME:      ptr %[[AWAITER:.*]], ptr %[[FRAME:.*]], ptr %[[OBJ:.*]], ptr %{{.*}}) personality ptr @__gxx_personality_v0
+// LLVM:         invoke void @llvm.coro.await.suspend.void(ptr %[[AWAITER]], ptr %[[FRAME]], ptr @wrapper_void)
+// LLVM-NEXT:            to label %[[NEXT:.*]] unwind label %[[LPAD:.*]]
+// LLVM:       [[NEXT]]:
+// LLVM-NEXT:    call void @llvm.coro.await.suspend.void(ptr %[[AWAITER]], ptr %[[FRAME]], ptr @wrapper_void) #[[NOUNWIND:[0-9]+]]
+// LLVM-NEXT:    %{{.*}} = invoke i1 @llvm.coro.await.suspend.bool(ptr %[[AWAITER]], ptr %[[FRAME]], ptr @wrapper_bool)
+// LLVM-NEXT:            to label %{{.*}} unwind label %[[LPAD]]
+// LLVM:       [[LPAD]]:
+// LLVM-NEXT:    landingpad { ptr, i32 }
+// LLVM-NEXT:            cleanup
+// LLVM:         call void @dtor(ptr %[[OBJ]])
+// LLVM:         resume { ptr, i32 }
+
+// Without an EH cleanup or handler, nothing unwinds to the cleanup, and the
+// call stays a call.
+cir.func @cleanup_normal(%awaiter : !cir.ptr<!void>, %frame : !cir.ptr<!void>, %obj : !cir.ptr<!s32i>) {
+  cir.cleanup.scope {
+    cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @wrapper_void) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+    cir.yield
+  } cleanup normal {
+    cir.call @dtor(%obj) nothrow : (!cir.ptr<!s32i>) -> ()
+    cir.yield
+  }
+  cir.return
+}
+
+// CHECK-LABEL: cir.func @cleanup_normal(
+// CHECK-NOT:     cir.coro.intrinsic.try_await.suspend
+// CHECK:         cir.coro.intrinsic.await.suspend.void(%{{.*}}, %{{.*}}, @wrapper_void) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+// CHECK-NOT:     cir.coro.intrinsic.try_await.suspend
+// CHECK:         cir.return
+
+// LLVM-LABEL: define void @cleanup_normal(
+// LLVM:         call void @llvm.coro.await.suspend.void(ptr %{{.*}}, ptr %{{.*}}, ptr @wrapper_void){{$}}
+
+// In a try, the call unwinds to the handlers, also from a nested scope that
+// is flattened first.
+cir.func @try_catch_all(%awaiter : !cir.ptr<!void>, %frame : !cir.ptr<!void>, %obj : !cir.ptr<!s32i>) {
+  cir.scope {
+    cir.try {
+      cir.cleanup.scope {
+        cir.coro.intrinsic.await.suspend.handle(%awaiter, %frame, @wrapper_handle) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+        cir.yield
+      } cleanup normal {
+        cir.call @dtor(%obj) nothrow : (!cir.ptr<!s32i>) -> ()
+        cir.yield
+      }
+      cir.yield
+    } catch all (%eh_token : !cir.eh_token) {
+      %catch_token, %exn_ptr = cir.begin_catch %eh_token : !cir.eh_token -> (!cir.catch_token, !cir.ptr<!void>)
+      cir.end_catch %catch_token : !cir.catch_token
+      cir.yield
+    }
+  }
+  cir.return
+}
+
+// CHECK-LABEL: cir.func @try_catch_all(
+// CHECK-SAME:      %[[AWAITER:[^:]*]]: !cir.ptr<!void>, %[[FRAME:[^:]*]]: !cir.ptr<!void>
+// CHECK:         cir.coro.intrinsic.try_await.suspend handle(%[[AWAITER]], %[[FRAME]], @wrapper_handle) ^{{bb[0-9]+}}, ^[[UNWIND:bb[0-9]+]] : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+// CHECK:       ^[[UNWIND]]:
+// CHECK-NEXT:    %[[EH:.*]] = cir.eh.initiate : !cir.eh_token
+// CHECK-NEXT:    cir.br ^[[DISPATCH:bb[0-9]+]](%[[EH]] : !cir.eh_token)
+// CHECK:       ^[[DISPATCH]](%[[TOKEN:.*]]: !cir.eh_token):
+// CHECK-NEXT:    cir.eh.dispatch %[[TOKEN]] : !cir.eh_token [
+// CHECK-NEXT:      catch_all : ^[[CATCH:bb[0-9]+]]
+// CHECK-NEXT:    ]
+// CHECK:       ^[[CATCH]](%{{.*}}: !cir.eh_token):
+// CHECK-NEXT:    cir.begin_catch
+
+// LLVM-LABEL: define void @try_catch_all(
+// LLVM:         invoke void @llvm.coro.await.suspend.handle(ptr %{{.*}}, ptr %{{.*}}, ptr @wrapper_handle)
+// LLVM-NEXT:            to label %{{.*}} unwind label %[[LPAD:.*]]
+// LLVM:       [[LPAD]]:
+// LLVM-NEXT:    landingpad { ptr, i32 }
+// LLVM-NEXT:            catch ptr null
+
+// LLVM: attributes #[[NOUNWIND]] = { nounwind }
+
+}

@@ -117,3 +117,107 @@ cir.func @handle_wrapper_returns_int_ptr(%awaiter: !cir.ptr<!void>, %frame: !cir
   cir.coro.intrinsic.await.suspend.handle(%awaiter, %frame, @wrapper_int_ptr) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
   cir.return
 }
+
+// -----
+
+!void = !cir.void
+
+cir.func private @wrapper_void(!cir.ptr<!void>, !cir.ptr<!void>)
+
+cir.func @try_void_with_result(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+  // expected-error @below {{must have a result if and only if its kind is 'bool'}}
+  %0 = cir.coro.intrinsic.try_await.suspend void(%awaiter, %frame, @wrapper_void) ^bb1, ^bb1 : (!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+^bb1:
+  cir.return
+}
+
+// -----
+
+!void = !cir.void
+
+cir.func private @wrapper_bool(!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+
+cir.func @try_bool_without_result(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+  // expected-error @below {{must have a result if and only if its kind is 'bool'}}
+  cir.coro.intrinsic.try_await.suspend bool(%awaiter, %frame, @wrapper_bool) ^bb1, ^bb1 : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+^bb1:
+  cir.return
+}
+
+// -----
+
+!void = !cir.void
+
+cir.func private @wrapper_void(!cir.ptr<!void>, !cir.ptr<!void>)
+
+cir.func @try_bool_wrapper_returns_void(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+  // expected-error @below {{wrapper must return '!cir.bool'}}
+  %0 = cir.coro.intrinsic.try_await.suspend bool(%awaiter, %frame, @wrapper_void) ^bb1, ^bb1 : (!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+^bb1:
+  cir.return
+}
+
+// -----
+
+!void = !cir.void
+
+cir.func private @wrapper_bool(!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+
+cir.func @try_void_wrapper_returns_bool(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+  // expected-error @below {{wrapper must return void}}
+  cir.coro.intrinsic.try_await.suspend void(%awaiter, %frame, @wrapper_bool) ^bb1, ^bb1 : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+^bb1:
+  cir.return
+}
+
+// -----
+
+!void = !cir.void
+
+cir.func private @wrapper_void(!cir.ptr<!void>, !cir.ptr<!void>)
+
+cir.func @try_handle_wrapper_returns_void(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+  // expected-error @below {{wrapper must return a pointer to void}}
+  cir.coro.intrinsic.try_await.suspend handle(%awaiter, %frame, @wrapper_void) ^bb1, ^bb1 : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+^bb1:
+  cir.return
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!void = !cir.void
+
+cir.func private @wrapper_int_ptr(!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.ptr<!s32i>
+
+cir.func @try_handle_wrapper_returns_int_ptr(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+  // expected-error @below {{wrapper must return a pointer to void}}
+  cir.coro.intrinsic.try_await.suspend handle(%awaiter, %frame, @wrapper_int_ptr) ^bb1, ^bb1 : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+^bb1:
+  cir.return
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!void = !cir.void
+
+cir.func private @wrapper_int_param(!cir.ptr<!void>, !cir.ptr<!s32i>)
+
+cir.func @try_wrapper_param_type_mismatch(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+  // expected-error @below {{wrapper parameters must match the types of the awaiter and frame operands}}
+  cir.coro.intrinsic.try_await.suspend void(%awaiter, %frame, @wrapper_int_param) ^bb1, ^bb1 : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+^bb1:
+  cir.return
+}
+
+// -----
+
+!void = !cir.void
+
+cir.func @try_missing_wrapper(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+  // expected-error @below {{'missing' does not reference a valid cir.func}}
+  cir.coro.intrinsic.try_await.suspend void(%awaiter, %frame, @missing) ^bb1, ^bb1 : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+^bb1:
+  cir.return
+}

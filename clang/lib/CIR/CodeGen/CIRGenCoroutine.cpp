@@ -961,13 +961,13 @@ emitSuspendExpression(CIRGenFunction &cgf, CGCoroData &coro,
 
         // Like classic codegen, assume that a handle-returning await_suspend
         // may throw: the coroutine split resumes the returned coroutine right
-        // after the wrapper call. One that may throw inside an EH scope needs
-        // an unwind edge, which classic codegen gives it with an invoke.
+        // after the wrapper call. The CFG flattening gives one that may throw
+        // an unwind edge where it needs one, as classic codegen does with an
+        // invoke.
         bool nothrow =
             s.getSuspendReturnType() !=
                 CoroutineSuspendExpr::SuspendReturnType::SuspendHandle &&
             !stmtCanThrow(s.getSuspendExpr());
-        assert(!cir::MissingFeatures::coroAwaitSuspendMayThrow());
         switch (s.getSuspendReturnType()) {
         case CoroutineSuspendExpr::SuspendReturnType::SuspendVoid:
           cir::CoroAwaitSuspendVoidOp::create(builder, loc, awaiter, frame,

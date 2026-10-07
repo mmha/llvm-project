@@ -2482,6 +2482,29 @@ mlir::LogicalResult CIRToLLVMCoroAwaitSuspendHandleOpLowering::matchAndRewrite(
   return mlir::success();
 }
 
+// Lowers a cir.coro.intrinsic.try_await.suspend operation to an invoke of the
+// LLVM intrinsic that the await.suspend operation of the same kind calls.
+mlir::LogicalResult CIRToLLVMCoroTryAwaitSuspendOpLowering::matchAndRewrite(
+    cir::CoroTryAwaitSuspendOp op, OpAdaptor adaptor,
+    mlir::ConversionPatternRewriter &rewriter) const {
+  mlir::Type resultTy =
+      op.getResult() ? getTypeConverter()->convertType(op.getResult().getType())
+                     : mlir::LLVM::LLVMVoidType::get(op.getContext());
+  mlir::LLVM::LLVMFunctionType fnTy;
+  mlir::FlatSymbolRefAttr callee = getOrCreateAwaitSuspendDecl(
+      cir::stringifyCoroAwaitSuspendKind(op.getKind()), resultTy, op, rewriter,
+      symbolTables, fnTy);
+  auto ptrTy = mlir::LLVM::LLVMPointerType::get(rewriter.getContext());
+  mlir::Value wrapper = mlir::LLVM::AddressOfOp::create(
+      rewriter, op.getLoc(), ptrTy, op.getWrapperAttr());
+  rewriter.replaceOpWithNewOp<mlir::LLVM::InvokeOp>(
+      op, fnTy, callee,
+      mlir::ValueRange{adaptor.getAwaiter(), adaptor.getFrame(), wrapper},
+      op.getNormalDest(), mlir::ValueRange{}, op.getUnwindDest(),
+      mlir::ValueRange{});
+  return mlir::success();
+}
+
 mlir::LogicalResult CIRToLLVMReturnAddrOpLowering::matchAndRewrite(
     cir::ReturnAddrOp op, OpAdaptor adaptor,
     mlir::ConversionPatternRewriter &rewriter) const {

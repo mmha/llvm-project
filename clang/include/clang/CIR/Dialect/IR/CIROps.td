@@ -5296,7 +5296,9 @@ class CIR_CoroAwaitSuspendOp<string kind, dag outs, string kindDescription>
 
     Like the `await_suspend` call it performs and the LLVM intrinsic, the
     operation may throw. An exception from it unwinds through the cleanups
-    and to the handlers that enclose it, like one from a `cir.call`.
+    and to the handlers that enclose it, like one from a `cir.call`: where
+    the CFG flattening pass turns a `cir.call` into a `cir.try_call`, it
+    turns the operation into a `cir.coro.intrinsic.try_await.suspend`.
     `nothrow` means that the `await_suspend` call cannot throw, so neither
     can the operation.
   }] # kindDescription;
@@ -5352,6 +5354,64 @@ def CIR_CoroAwaitSuspendHandleOp : CIR_CoroAwaitSuspendOp<"handle", (outs), [{
         : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
     ```
   }]>;
+
+//===----------------------------------------------------------------------===//
+// Coroutine intrinsic TryAwaitSuspendOp
+//===----------------------------------------------------------------------===//
+
+def CIR_CoroAwaitSuspendKind : CIR_I32Enum<"CoroAwaitSuspendKind",
+    "await_suspend result kind", [
+  I32EnumCase<"Void", 0, "void">,
+  I32EnumCase<"Bool", 1, "bool">,
+  I32EnumCase<"Handle", 2, "handle">
+]>;
+
+def CIR_CoroAwaitSuspendKindAttr
+    : CIR_EnumAttr<CIR_CoroAwaitSuspendKind, "await_suspend_kind">;
+
+def CIR_CoroTryAwaitSuspendOp : CIR_Op<"coro.intrinsic.try_await.suspend", [
+  Terminator, DeclareOpInterfaceMethods<SymbolUserOpInterface>
+]> {
+  let summary = "Invokes llvm.coro.await.suspend.{void,bool,handle}";
+  let description = [{
+    Like `cir.coro.intrinsic.await.suspend.void`,
+    `cir.coro.intrinsic.await.suspend.bool` and
+    `cir.coro.intrinsic.await.suspend.handle`, selected by `kind`, but with
+    two destination blocks: `normalDest` if the `await_suspend` call returns,
+    and `unwindDest` if it throws an exception. It is the counterpart of
+    these operations that `cir.try_call` is of `cir.call`, and lowers to an
+    `invoke` of the LLVM intrinsic.
+
+    The `bool` kind returns the result of the wrapper, which is only
+    available in `normalDest`.
+
+    The CFG flattening pass creates this operation for an `await_suspend`
+    call that may throw in the body of a `cir.cleanup.scope` with an EH
+    cleanup or in the try region of a `cir.try`.
+
+    Example:
+
+    ```mlir
+    %suspend = cir.coro.intrinsic.try_await.suspend bool(%awaiter, %frame,
+        @wrapper) ^normal, ^unwind : (!cir.ptr<!void>, !cir.ptr<!void>)
+        -> !cir.bool
+    ```
+  }];
+
+  let arguments = (ins CIR_CoroAwaitSuspendKindAttr:$kind,
+                       CIR_VoidPtrType:$awaiter, CIR_VoidPtrType:$frame,
+                       FlatSymbolRefAttr:$wrapper);
+  let results = (outs Optional<CIR_AnyBoolType>:$result);
+  let successors = (successor AnySuccessor:$normalDest,
+                              AnySuccessor:$unwindDest);
+
+  let assemblyFormat = [{
+    enum($kind) `(` $awaiter `,` $frame `,` $wrapper `)` $normalDest `,`
+      $unwindDest `:` functional-type(operands, results) attr-dict
+  }];
+
+  let hasVerifier = 1;
+}
 
 //===----------------------------------------------------------------------===//
 // Coroutine intrinsic PromiseOp

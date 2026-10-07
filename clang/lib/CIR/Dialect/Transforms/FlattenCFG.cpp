@@ -889,19 +889,84 @@ static bool hasEnclosingEHRequirement(mlir::Operation *op) {
   return false;
 }
 
+// Whether an operation is the await_suspend wrapper call of a coroutine suspend
+// point that may throw.
+static bool isThrowingAwaitSuspend(mlir::Operation *op) {
+  return llvm::TypeSwitch<mlir::Operation *, bool>(op)
+      .Case<cir::CoroAwaitSuspendVoidOp, cir::CoroAwaitSuspendBoolOp,
+            cir::CoroAwaitSuspendHandleOp>(
+          [](auto awaitSuspend) { return !awaitSuspend.getNothrow(); })
+      .Default(false);
+}
+
+// Replace a throwing cir.coro.intrinsic.await.suspend.* operation with a
+// cir.coro.intrinsic.try_await.suspend whose unwind destination is
+// `unwindDest`, like replaceCallWithTryCall does for a cir.call.
+static void replaceAwaitSuspendWithTry(mlir::Operation *op,
+                                       mlir::Block *unwindDest,
+                                       mlir::Location loc,
+                                       mlir::RewriterBase &rewriter) {
+  cir::CoroAwaitSuspendKind kind = cir::CoroAwaitSuspendKind::Void;
+  mlir::FlatSymbolRefAttr wrapper;
+  llvm::TypeSwitch<mlir::Operation *>(op)
+      .Case<cir::CoroAwaitSuspendVoidOp>([&](auto awaitSuspend) {
+        kind = cir::CoroAwaitSuspendKind::Void;
+        wrapper = awaitSuspend.getWrapperAttr();
+      })
+      .Case<cir::CoroAwaitSuspendBoolOp>([&](auto awaitSuspend) {
+        kind = cir::CoroAwaitSuspendKind::Bool;
+        wrapper = awaitSuspend.getWrapperAttr();
+      })
+      .Case<cir::CoroAwaitSuspendHandleOp>([&](auto awaitSuspend) {
+        kind = cir::CoroAwaitSuspendKind::Handle;
+        wrapper = awaitSuspend.getWrapperAttr();
+      });
+  assert(wrapper && "not an await_suspend wrapper call");
+
+  // The rest of the block becomes the normal destination.
+  mlir::Block *normalDest =
+      rewriter.splitBlock(op->getBlock(), std::next(op->getIterator()));
+  rewriter.setInsertionPoint(op);
+  mlir::Type resultType =
+      op->getNumResults() > 0 ? op->getResult(0).getType() : mlir::Type();
+  auto tryOp = cir::CoroTryAwaitSuspendOp::create(
+      rewriter, loc, resultType, kind, op->getOperand(0), op->getOperand(1),
+      wrapper.getValue(), normalDest, unwindDest);
+  if (op->getNumResults() > 0)
+    rewriter.replaceAllUsesWith(op->getResult(0), tryOp.getResult());
+  rewriter.eraseOp(op);
+}
+
+// Give an operation that collectThrowingCalls collected the unwind destination
+// `unwindDest`.
+static void replaceWithUnwindingOp(mlir::Operation *op, mlir::Block *unwindDest,
+                                   mlir::Location loc,
+                                   mlir::RewriterBase &rewriter) {
+  if (auto callOp = dyn_cast<cir::CallOp>(op))
+    replaceCallWithTryCall(callOp, unwindDest, loc, rewriter);
+  else
+    replaceAwaitSuspendWithTry(op, unwindDest, loc, rewriter);
+}
+
 // Collect all function calls in a region that may throw exceptions and need
-// to be replaced with try_call operations. Skips calls marked nothrow.
+// to be replaced with try_call operations, and the await_suspend wrapper calls
+// of coroutine suspend points that may throw, which need to be replaced with
+// cir.coro.intrinsic.try_await.suspend operations. Skips calls marked nothrow.
 // Nested cleanup scopes and try ops are always flattened before their
 // enclosing parents, so there are no nested regions to skip here.
 static void
 collectThrowingCalls(mlir::Region &region,
-                     llvm::SmallVectorImpl<cir::CallOp> &callsToRewrite) {
-  region.walk([&](cir::CallOp callOp) {
+                     llvm::SmallVectorImpl<mlir::Operation *> &callsToRewrite) {
+  region.walk([&](mlir::Operation *op) {
     // A musttail call is never an invoke. LLVM has no musttail invoke, and
     // the tail call replaces the frame the cleanup would have run in, so
     // there is nothing left to unwind through.
-    if (!callOp.getNothrow() && !callOp.getMusttail())
-      callsToRewrite.push_back(callOp);
+    if (auto callOp = dyn_cast<cir::CallOp>(op)) {
+      if (!callOp.getNothrow() && !callOp.getMusttail())
+        callsToRewrite.push_back(callOp);
+    } else if (isThrowingAwaitSuspend(op)) {
+      callsToRewrite.push_back(op);
+    }
   });
 }
 
@@ -1444,7 +1509,7 @@ public:
   mlir::LogicalResult
   flattenCleanup(cir::CleanupScopeOp cleanupOp,
                  llvm::SmallVectorImpl<CleanupExit> &exits,
-                 llvm::SmallVectorImpl<cir::CallOp> &callsToRewrite,
+                 llvm::SmallVectorImpl<mlir::Operation *> &callsToRewrite,
                  llvm::SmallVectorImpl<cir::ThrowOp> &throwsToRewrite,
                  llvm::SmallVectorImpl<cir::ResumeOp> &resumeOpsToChain,
                  mlir::PatternRewriter &rewriter) const {
@@ -1636,8 +1701,8 @@ public:
     // operations. All calls and throws within this cleanup scope share the
     // same unwind destination.
     if (hasEHCleanup) {
-      for (cir::CallOp callOp : callsToRewrite)
-        replaceCallWithTryCall(callOp, unwindBlock, loc, rewriter);
+      for (mlir::Operation *callOp : callsToRewrite)
+        replaceWithUnwindingOp(callOp, unwindBlock, loc, rewriter);
       for (cir::ThrowOp throwOp : throwsToRewrite)
         replaceThrowWithTryThrow(throwOp, unwindBlock, loc, rewriter);
     }
@@ -1743,7 +1808,7 @@ public:
     // Collect non-nothrow calls and throws that need to be converted to
     // try_call/try_throw. A marker-only cleanup must not introduce an unwind
     // edge unless an enclosing handler or real EH cleanup requires one.
-    llvm::SmallVector<cir::CallOp> callsToRewrite;
+    llvm::SmallVector<mlir::Operation *> callsToRewrite;
     llvm::SmallVector<cir::ThrowOp> throwsToRewrite;
     if (hasEHCleanup && (!isLifetimeMarkerOnly(cleanupOp.getCleanupRegion()) ||
                          hasEnclosingEHRequirement(cleanupOp))) {
@@ -1976,7 +2041,7 @@ public:
         tryOp.getHandlerRegions();
 
     // Collect throwing calls and throws in the try body.
-    llvm::SmallVector<cir::CallOp> callsToRewrite;
+    llvm::SmallVector<mlir::Operation *> callsToRewrite;
     collectThrowingCalls(tryOp.getTryRegion(), callsToRewrite);
     llvm::SmallVector<cir::ThrowOp> throwsToRewrite;
     collectThrows(tryOp.getTryRegion(), throwsToRewrite);
@@ -2077,8 +2142,8 @@ public:
       mlir::Block *unwindBlock = buildUnwindBlock(dispatchBlock, isCleanupOnly,
                                                   loc, dispatchBlock, rewriter);
 
-      for (cir::CallOp callOp : callsToRewrite)
-        replaceCallWithTryCall(callOp, unwindBlock, loc, rewriter);
+      for (mlir::Operation *callOp : callsToRewrite)
+        replaceWithUnwindingOp(callOp, unwindBlock, loc, rewriter);
       for (cir::ThrowOp throwOp : throwsToRewrite)
         replaceThrowWithTryThrow(throwOp, unwindBlock, loc, rewriter);
     }
