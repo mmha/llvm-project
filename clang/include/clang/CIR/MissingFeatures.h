@@ -124,6 +124,8 @@ struct MissingFeatures {
   static bool noUniqueAddressLayout() { return false; }
 
   // Coroutines
+  static bool coroAwaitSuspendMayThrow() { return false; }
+  static bool coroAwaitSuspendWrapperProfileAttr() { return false; }
   static bool coroOutsideFrameMD() { return false; }
   static bool coroUnwindRegion() { return false; }
 

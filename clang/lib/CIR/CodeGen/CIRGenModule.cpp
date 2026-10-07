@@ -3411,6 +3411,20 @@ void CIRGenModule::setCIRFunctionAttributesForDefinition(
     addSYCLModuleIdAttr(f);
 }
 
+void CIRGenModule::setInternalFunctionAttributes(GlobalDecl gd, cir::FuncOp f,
+                                                 const CIRGenFunctionInfo &fi) {
+  setCIRFunctionAttributes(gd, fi, f, /*isThunk=*/false);
+  setCIRFunctionAttributesForDefinition(
+      dyn_cast_or_null<FunctionDecl>(gd.getDecl()), f);
+
+  cir::GlobalLinkageKind linkage = cir::GlobalLinkageKind::InternalLinkage;
+  f.setLinkageAttr(cir::GlobalLinkageKindAttr::get(&getMLIRContext(), linkage));
+  mlir::SymbolTable::setSymbolVisibility(
+      f, getMLIRVisibilityFromCIRLinkage(linkage));
+
+  setNonAliasAttributes(gd, f);
+}
+
 // Maps an AST address space to the OpenCL logical address space kind recorded
 // in kernel argument metadata. This mapping is independent of the target
 // address space map, allowing consumers to distinguish OpenCL logical address

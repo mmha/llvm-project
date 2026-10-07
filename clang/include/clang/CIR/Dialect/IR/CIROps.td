@@ -4935,7 +4935,10 @@ def CIR_AwaitOp : CIR_RegionBranchOpBase<"await", [
 
     `cir.await` represents this logic by using 3 regions:
       - ready: covers veto power from x.await_ready()
-      - suspend: wraps actual x.await_suspend() logic
+      - suspend: performs the x.await_suspend() call, normally through a
+        `cir.coro.intrinsic.await.suspend.*` operation that calls an outlined
+        wrapper function, and ends with a `cir.coro.suspend_point`, or, for an
+        await_suspend that returns bool, with a `cir.condition` of its result.
       - resume: handles x.await_resume()
 
     Breaking this up in regions allows individual scrutiny of conditions
@@ -4955,7 +4958,7 @@ def CIR_AwaitOp : CIR_RegionBranchOpBase<"await", [
         cir.await(user, ready : {
           ... // x.await_ready()
         }, suspend : {
-          ... // x.await_suspend()
+          ... // x.await_suspend() through its wrapper
         }, resume : {
           ... // x.await_resume()
         })

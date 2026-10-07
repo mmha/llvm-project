@@ -120,6 +120,13 @@ public:
 
   bool isCoroutine() const { return curCoro.data != nullptr; }
 
+  // Holds the frame pointer parameter of the await_suspend wrapper being
+  // generated, so that __builtin_coro_frame can return it.
+  struct AwaitSuspendWrapperInfo {
+    mlir::Value framePtr = nullptr;
+  };
+  AwaitSuspendWrapperInfo curAwaitSuspendWrapper;
+
   /// The temporary alloca to hold the return value. This is
   /// invalid iff the function has no return value.
   Address returnValue = Address::invalid();
@@ -2070,6 +2077,14 @@ public:
   cir::CoroSizeOp emitCoroSizeBuiltinCall(const CallExpr *e);
   cir::CoroFreeOp emitCoroFreeBuiltin(const CallExpr *e);
   RValue emitCoroutineFrame();
+
+  /// Generate the function that a cir.coro.intrinsic.await.suspend.* operation
+  /// calls: it evaluates the await_suspend expression of \p s on the awaiter
+  /// and coroutine frame it receives as its two parameters. The function is
+  /// named "<coroName>.__await_suspend_wrapper__<suspendPointName>".
+  cir::FuncOp generateAwaitSuspendWrapper(llvm::StringRef coroName,
+                                          llvm::StringRef suspendPointName,
+                                          const CoroutineSuspendExpr &s);
 
   void emitDestroy(Address addr, QualType type, Destroyer *destroyer);
 

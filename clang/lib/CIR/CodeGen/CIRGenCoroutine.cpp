@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "CIRGenFunction.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Support/LLVM.h"
 #include "clang/AST/StmtCXX.h"
 #include "clang/AST/StmtVisitor.h"
@@ -26,6 +27,9 @@ struct clang::CIRGen::CGCoroData {
   // await/yield expressions were encountered so far.
   // These are used to generate pretty labels for await expressions in LLVM IR.
   cir::AwaitKind currentAwaitKind = cir::AwaitKind::Init;
+  unsigned awaitNum = 0;
+  unsigned yieldNum = 0;
+
   // Stores the __builtin_coro_id emitted in the function so that we can supply
   // it as the first argument to other builtins.
   cir::CoroIdOp coroId = nullptr;
@@ -124,6 +128,8 @@ RValue CIRGenFunction::emitCoroutineFrame() {
   if (curCoro.data && curCoro.data->coroBegin) {
     return RValue::get(curCoro.data->coroBegin);
   }
+  if (curAwaitSuspendWrapper.framePtr)
+    return RValue::get(curAwaitSuspendWrapper.framePtr);
   cgm.errorNYI("NYI");
   return RValue();
 }
@@ -149,6 +155,38 @@ static void createCoroData(CIRGenFunction &cgf,
   curCoro.data = std::make_unique<CGCoroData>();
   curCoro.data->coroId = coroId;
   curCoro.data->coroIdExpr = coroIdExpr;
+}
+
+// Synthesize a pretty name for a suspend point, using the naming scheme of
+// classic codegen: "init" and "final" for the implicit suspend points, and
+// "await<N>" and "yield<N>" for the N-th co_await and co_yield, without the
+// number for the first one. Unlike classic codegen, CIRGen also emits
+// unreachable suspend expressions, which consume a number, so later suspend
+// points may be numbered differently.
+static SmallString<32> buildSuspendPrefixStr(CGCoroData &coro,
+                                             cir::AwaitKind kind) {
+  unsigned no = 0;
+  StringRef name;
+  switch (kind) {
+  case cir::AwaitKind::Init:
+    name = "init";
+    break;
+  case cir::AwaitKind::User:
+    name = "await";
+    no = ++coro.awaitNum;
+    break;
+  case cir::AwaitKind::Yield:
+    name = "yield";
+    no = ++coro.yieldNum;
+    break;
+  case cir::AwaitKind::Final:
+    name = "final";
+    break;
+  }
+  SmallString<32> prefix(name);
+  if (no > 1)
+    Twine(no).toVector(prefix);
+  return prefix;
 }
 
 static mlir::LogicalResult
@@ -740,6 +778,105 @@ static bool stmtCanThrow(const Stmt *s) {
   });
 }
 
+// The await_suspend call of a suspend expression is emitted into a separate
+// function rather than into the coroutine itself:
+//
+//   auto __await_suspend_wrapper(auto &awaiter, void *frame) {
+//     std::coroutine_handle<> handle(frame);
+//     return awaiter.await_suspend(handle);
+//   }
+//
+// The coroutine calls it through a cir.coro.intrinsic.await.suspend.*
+// operation, which CoroSplit replaces with a direct call before it builds the
+// coroutine frame. await_suspend may resume or destroy the coroutine, possibly
+// on another thread, before it returns, which the control flow of the unsplit
+// coroutine does not reflect. Keeping the call opaque until CoroSplit prevents
+// the optimizations that run before it from moving accesses to the coroutine
+// frame across it, and lets CoroSplit resume the coroutine returned by a
+// handle-returning await_suspend with a tail call (symmetric transfer).
+//
+// The wrapper is generated here rather than when cir.await is lowered because
+// its body is the suspend expression of the AST, emitted again with the
+// awaiter bound to the first parameter and __builtin_coro_frame returning the
+// second one. Outlining the suspend region of a cir.await instead would have
+// to deal with the values and allocas of the coroutine that it uses, and with
+// the cleanups of by-value await_suspend arguments.
+cir::FuncOp
+CIRGenFunction::generateAwaitSuspendWrapper(StringRef coroName,
+                                            StringRef suspendPointName,
+                                            const CoroutineSuspendExpr &s) {
+  std::string funcName =
+      (coroName + ".__await_suspend_wrapper__" + suspendPointName).str();
+
+  ASTContext &ctx = getContext();
+  auto *awaiterDecl =
+      ImplicitParamDecl::Create(ctx, ctx.VoidPtrTy, ImplicitParamKind::Other);
+  auto *frameDecl =
+      ImplicitParamDecl::Create(ctx, ctx.VoidPtrTy, ImplicitParamKind::Other);
+  // void, bool, or void * for a coroutine handle: Sema calls address() on a
+  // handle returned by await_suspend.
+  QualType returnTy = s.getSuspendExpr()->getType();
+
+  FunctionArgList args;
+  args.push_back(awaiterDecl);
+  args.push_back(frameDecl);
+  const CIRGenFunctionInfo &fnInfo =
+      cgm.getTypes().arrangeBuiltinFunctionDeclaration(returnTy, args);
+  cir::FuncType fnType = cgm.getTypes().getFunctionType(fnInfo);
+
+  SourceLocRAIIObject fnLoc{*this, s.getSourceRange()};
+  mlir::Location loc = getLoc(s.getSourceRange());
+  cir::FuncOp fn =
+      cgm.createCIRFunction(loc, funcName, fnType, /*funcDecl=*/nullptr);
+  cgm.setInternalFunctionAttributes(GlobalDecl(), fn, fnInfo);
+
+  mlir::UnitAttr unitAttr = builder.getUnitAttr();
+  fn.setArgAttr(0, mlir::LLVM::LLVMDialect::getNonNullAttrName(), unitAttr);
+  fn.setArgAttr(0, mlir::LLVM::LLVMDialect::getNoUndefAttrName(), unitAttr);
+  fn.setArgAttr(1, mlir::LLVM::LLVMDialect::getNoUndefAttrName(), unitAttr);
+  fn->setAttr(cir::CIRDialect::getMustProgressAttrName(), unitAttr);
+  // Inline the wrapper as soon as the coroutine split has turned the
+  // intrinsic into a direct call, even at -O0.
+  fn.setInlineKind(cir::InlineKind::AlwaysInline);
+  assert(!cir::MissingFeatures::coroAwaitSuspendWrapperProfileAttr());
+
+  mlir::OpBuilder::InsertionGuard guard(builder);
+  mlir::Block *entryBB = fn.addEntryBlock();
+  SymTableScopeTy varScope(symbolTable);
+  {
+    LexicalScope lexScope(*this, loc, entryBB);
+    startFunction(GlobalDecl(), returnTy, fn, fnType, args, s.getEndLoc(),
+                  s.getBeginLoc());
+
+    // The awaiter is passed as a void pointer. Bind the awaiter expression to
+    // the object it points to.
+    assert(!cir::MissingFeatures::opTBAA());
+    const OpaqueValueExpr *awaiterExpr = s.getOpaqueValue();
+    QualType awaiterTy = awaiterExpr->getType();
+    mlir::Value awaiterPtr = builder.createBitcast(
+        loc, builder.createLoad(loc, getAddrOfLocalVar(awaiterDecl)),
+        builder.getPointerTo(convertTypeForMem(awaiterTy)));
+    OpaqueValueMapping awaiterBinder(
+        *this, awaiterExpr, makeNaturalAlignAddrLValue(awaiterPtr, awaiterTy));
+
+    curAwaitSuspendWrapper.framePtr =
+        builder.createLoad(loc, getAddrOfLocalVar(frameDecl));
+
+    mlir::Value suspendRet = emitScalarExpr(s.getSuspendExpr());
+    if (!returnTy->isVoidType()) {
+      fn.setResultAttr(0, mlir::LLVM::LLVMDialect::getNoUndefAttrName(),
+                       unitAttr);
+      builder.createStore(loc, suspendRet, returnValue);
+    }
+
+    curAwaitSuspendWrapper.framePtr = nullptr;
+    finishFunction(s.getEndLoc());
+  }
+
+  eraseEmptyAndUnusedBlocks(fn);
+  return fn;
+}
+
 // Given a suspend expression which roughly looks like:
 //
 //   auto && x = CommonExpr();
@@ -750,9 +887,13 @@ static bool stmtCanThrow(const Stmt *s) {
 //
 // where the result of the entire expression is the result of x.await_resume()
 //
-//   (*) If x.await_suspend return type is bool, it allows to veto a suspend:
+//   (*) The call is emitted into a wrapper function, see
+//      generateAwaitSuspendWrapper. If x.await_suspend return type is bool, it
+//      allows to veto a suspend:
 //      if (x.await_suspend(...))
 //        llvm_coro_suspend();
+//      If it returns a coroutine handle, the coroutine suspends and the
+//      coroutine that the handle refers to is resumed.
 //
 // This is more higher level than LLVM codegen, for that one see llvm's
 // docs/Coroutines.md for more details.
@@ -792,6 +933,13 @@ emitSuspendExpression(CIRGenFunction &cgf, CGCoroData &coro,
   CIRGenFunction::OpaqueValueMapping binder =
       CIRGenFunction::OpaqueValueMapping(cgf, s.getOpaqueValue());
   CIRGenBuilderTy &builder = cgf.getBuilder();
+
+  SmallString<32> prefix = buildSuspendPrefixStr(coro, kind);
+  cir::FuncOp suspendWrapper =
+      CIRGenFunction(cgf.cgm, builder)
+          .generateAwaitSuspendWrapper(
+              mlir::cast<cir::FuncOp>(cgf.curFn).getSymName(), prefix, s);
+
   [[maybe_unused]] cir::AwaitOp awaitOp = cir::AwaitOp::create(
       builder, cgf.getLoc(s.getSourceRange()), kind,
       /*readyBuilder=*/
@@ -801,25 +949,46 @@ emitSuspendExpression(CIRGenFunction &cgf, CGCoroData &coro,
       },
       /*suspendBuilder=*/
       [&](mlir::OpBuilder &b, mlir::Location loc) {
-        // Note that differently from LLVM codegen we do not emit coro.save
-        // and coro.suspend here, that should be done as part of lowering this
-        // to LLVM dialect (or some other MLIR dialect)
+        // coro.save and coro.suspend are left to the lowering of cir.await;
+        // only the await_suspend call is outlined here.
+        assert(coro.coroBegin && "expected to be called in coroutine context");
+        mlir::Value awaiter = builder.createBitcast(
+            loc,
+            cgf.getOrCreateOpaqueLValueMapping(s.getOpaqueValue()).getPointer(),
+            cgf.voidPtrTy);
+        mlir::Value frame = coro.coroBegin;
+        StringRef wrapper = suspendWrapper.getSymName();
 
-        if (s.getSuspendReturnType() ==
-            CoroutineSuspendExpr::SuspendReturnType::SuspendBool) {
-          mlir::Value suspendRet = cgf.evaluateExprAsBool(s.getSuspendExpr());
+        // Like classic codegen, assume that a handle-returning await_suspend
+        // may throw: the coroutine split resumes the returned coroutine right
+        // after the wrapper call. One that may throw inside an EH scope needs
+        // an unwind edge, which classic codegen gives it with an invoke.
+        bool nothrow =
+            s.getSuspendReturnType() !=
+                CoroutineSuspendExpr::SuspendReturnType::SuspendHandle &&
+            !stmtCanThrow(s.getSuspendExpr());
+        assert(!cir::MissingFeatures::coroAwaitSuspendMayThrow());
+        switch (s.getSuspendReturnType()) {
+        case CoroutineSuspendExpr::SuspendReturnType::SuspendVoid:
+          cir::CoroAwaitSuspendVoidOp::create(builder, loc, awaiter, frame,
+                                              wrapper, nothrow);
+          break;
+        case CoroutineSuspendExpr::SuspendReturnType::SuspendBool: {
+          mlir::Value suspendRet = cir::CoroAwaitSuspendBoolOp::create(
+              builder, loc, awaiter, frame, wrapper, nothrow);
           // Veto suspension if requested by bool returning await_suspend.
           builder.createCondition(suspendRet);
-        } else if (s.getSuspendReturnType() ==
-                   CoroutineSuspendExpr::SuspendReturnType::SuspendVoid) {
-          cgf.emitScalarExpr(s.getSuspendExpr());
-          // Signals the parent that execution flows to next region.
-          cir::CoroSuspendPoint::create(builder, loc);
-        } else {
-          cgf.cgm.errorNYI(s.getSourceRange(),
-                           "await_suspend returning handle");
-          cir::CoroSuspendPoint::create(builder, loc);
+          return;
         }
+        case CoroutineSuspendExpr::SuspendReturnType::SuspendHandle:
+          // The coroutine split resumes the returned coroutine right after
+          // the wrapper call.
+          cir::CoroAwaitSuspendHandleOp::create(builder, loc, awaiter, frame,
+                                                wrapper, nothrow);
+          break;
+        }
+        // Signals the parent that execution flows to next region.
+        cir::CoroSuspendPoint::create(builder, loc);
       },
       /*resumeBuilder=*/
       [&](mlir::OpBuilder &b, mlir::Location loc) {

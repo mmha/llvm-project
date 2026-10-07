@@ -665,6 +665,11 @@ public:
   void setCIRFunctionAttributesForDefinition(const clang::FunctionDecl *fd,
                                              cir::FuncOp f);
 
+  /// Set the attributes and the internal linkage of a function that CIRGen
+  /// synthesizes, such as a helper that has no declaration in the source.
+  void setInternalFunctionAttributes(GlobalDecl gd, cir::FuncOp f,
+                                     const CIRGenFunctionInfo &fi);
+
   /// Generate OpenCL kernel argument metadata for a kernel function.
   void emitOpenCLKernelArgMetadata(cir::FuncOp func,
                                    const clang::FunctionDecl *fd);

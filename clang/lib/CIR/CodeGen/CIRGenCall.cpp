@@ -1059,6 +1059,18 @@ CIRGenTypes::arrangeBuiltinFunctionCall(QualType resultType,
                                 FunctionType::ExtInfo(), RequiredArgs::All);
 }
 
+const CIRGenFunctionInfo &
+CIRGenTypes::arrangeBuiltinFunctionDeclaration(QualType resultType,
+                                               const FunctionArgList &args) {
+  llvm::SmallVector<CanQualType, 16> argTypes;
+  for (const VarDecl *arg : args)
+    argTypes.push_back(astContext.getCanonicalParamType(arg->getType()));
+
+  CanQualType retType = resultType->getCanonicalTypeUnqualified();
+  return arrangeCIRFunctionInfo(retType, /*isInstanceMethod=*/false, argTypes,
+                                FunctionType::ExtInfo(), RequiredArgs::All);
+}
+
 /// Set calling convention for CUDA/HIP kernel.
 static void setCUDAKernelCallingConvention(CanQualType &funcTy,
                                            CIRGenModule &cgm,
