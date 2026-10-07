@@ -734,9 +734,19 @@ void CIRGenFunction::popCleanupBlock(bool forDeactivation) {
         builder.createFlagStore(loc, true, activeFlag.getPointer());
       }
 
-      // Set the flag to false at the end of the cleanup scope body region.
-      assert(builder.getInsertionBlock() ==
-                 &cleanupScope.getBodyRegion().back() &&
+      // Set the flag to false at the current insertion point, where the
+      // cleanup is deactivated. This is usually the end of the cleanup scope
+      // body region, but it can also be nested inside a cleanup scope opened
+      // later in the same body that is still open, such as the scope that a
+      // ConditionalEvaluation opens for the cleanups of a ?:, && or ||
+      // operand, which stays open until the end of the full-expression. A
+      // deferred deactivation, such as that of the members of an aggregate at
+      // the end of its initialization, can happen before then. The store is
+      // still on every path that completes the initialization, and an exit
+      // before it, e.g. from a statement expression in the operand, still
+      // runs the cleanup.
+      assert(cleanupScope.getBodyRegion().isAncestor(
+                 builder.getInsertionBlock()->getParent()) &&
              "expected insertion point in cleanup body");
       builder.createFlagStore(loc, false, activeFlag.getPointer());
 
