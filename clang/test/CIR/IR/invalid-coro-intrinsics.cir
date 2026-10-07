@@ -1,0 +1,119 @@
+// RUN: cir-opt %s -verify-diagnostics -split-input-file
+
+!void = !cir.void
+
+cir.func @wrapper_missing(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+  // expected-error @below {{'missing' does not reference a valid cir.func}}
+  cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @missing) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+  cir.return
+}
+
+// -----
+
+!void = !cir.void
+
+cir.global external @not_a_function = #cir.ptr<null> : !cir.ptr<!void>
+
+cir.func @wrapper_not_a_function(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+  // expected-error @below {{'not_a_function' does not reference a valid cir.func}}
+  cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @not_a_function) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+  cir.return
+}
+
+// -----
+
+!void = !cir.void
+
+cir.func private @wrapper_one_param(!cir.ptr<!void>)
+
+cir.func @wrapper_too_few_params(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+  // expected-error @below {{wrapper parameters must match the types of the awaiter and frame operands}}
+  cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @wrapper_one_param) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+  cir.return
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!void = !cir.void
+
+cir.func private @wrapper_int_param(!cir.ptr<!void>, !cir.ptr<!s32i>)
+
+cir.func @wrapper_param_type_mismatch(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+  // expected-error @below {{wrapper parameters must match the types of the awaiter and frame operands}}
+  cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @wrapper_int_param) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+  cir.return
+}
+
+// -----
+
+!void = !cir.void
+
+cir.func private @wrapper_variadic(!cir.ptr<!void>, !cir.ptr<!void>, ...)
+
+cir.func @wrapper_is_variadic(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+  // expected-error @below {{wrapper parameters must match the types of the awaiter and frame operands}}
+  cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @wrapper_variadic) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+  cir.return
+}
+
+// -----
+
+!void = !cir.void
+
+cir.func private @wrapper_bool(!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+
+cir.func @void_wrapper_returns_bool(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+  // expected-error @below {{wrapper must return void}}
+  cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @wrapper_bool) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+  cir.return
+}
+
+// -----
+
+!void = !cir.void
+
+cir.func private @wrapper_void(!cir.ptr<!void>, !cir.ptr<!void>)
+
+cir.func @bool_wrapper_returns_void(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+  // expected-error @below {{wrapper must return '!cir.bool'}}
+  %0 = cir.coro.intrinsic.await.suspend.bool(%awaiter, %frame, @wrapper_void) : (!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+  cir.return
+}
+
+// -----
+
+!void = !cir.void
+
+cir.func private @wrapper_bool(!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+
+cir.func @handle_wrapper_returns_bool(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+  // expected-error @below {{wrapper must return a pointer to void}}
+  cir.coro.intrinsic.await.suspend.handle(%awaiter, %frame, @wrapper_bool) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+  cir.return
+}
+
+// -----
+
+!void = !cir.void
+
+cir.func private @wrapper_void(!cir.ptr<!void>, !cir.ptr<!void>)
+
+cir.func @handle_wrapper_returns_void(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+  // expected-error @below {{wrapper must return a pointer to void}}
+  cir.coro.intrinsic.await.suspend.handle(%awaiter, %frame, @wrapper_void) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+  cir.return
+}
+
+// -----
+
+!s32i = !cir.int<s, 32>
+!void = !cir.void
+
+cir.func private @wrapper_int_ptr(!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.ptr<!s32i>
+
+cir.func @handle_wrapper_returns_int_ptr(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+  // expected-error @below {{wrapper must return a pointer to void}}
+  cir.coro.intrinsic.await.suspend.handle(%awaiter, %frame, @wrapper_int_ptr) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+  cir.return
+}

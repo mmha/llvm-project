@@ -1,0 +1,56 @@
+// RUN: cir-opt %s -cse -canonicalize -o - | FileCheck %s
+
+// The coroutine intrinsic operations are not side-effect free: CSE must not
+// merge two saves or two is_in_ramp operations, and canonicalization must not
+// erase them, a dead, or an await_suspend wrapper call, even when their
+// results are unused.
+
+!s32i = !cir.int<s, 32>
+!void = !cir.void
+
+module {
+  cir.func private @wrapper_bool(!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+
+  // CHECK-LABEL: cir.func @not_merged
+  cir.func @not_merged() -> !cir.bool {
+    %null = cir.const #cir.ptr<null> : !cir.ptr<!void>
+    %s1 = cir.coro.intrinsic.save(%null) : (!cir.ptr<!void>) -> token
+    %s2 = cir.coro.intrinsic.save(%null) : (!cir.ptr<!void>) -> token
+    %r1 = cir.coro.intrinsic.is_in_ramp() : () -> !cir.bool
+    %r2 = cir.coro.intrinsic.is_in_ramp() : () -> !cir.bool
+    %x = cir.and %r1, %r2 : !cir.bool
+    cir.return %x : !cir.bool
+  }
+  // CHECK:      cir.coro.intrinsic.save
+  // CHECK-NEXT: cir.coro.intrinsic.save
+  // CHECK-NEXT: %[[R1:.*]] = cir.coro.intrinsic.is_in_ramp()
+  // CHECK-NEXT: %[[R2:.*]] = cir.coro.intrinsic.is_in_ramp()
+  // CHECK-NEXT: cir.and %[[R1]], %[[R2]]
+
+  // CHECK-LABEL: cir.func @not_erased
+  cir.func @not_erased(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+    %null = cir.const #cir.ptr<null> : !cir.ptr<!void>
+    %s = cir.coro.intrinsic.save(%null) : (!cir.ptr<!void>) -> token
+    %r = cir.coro.intrinsic.is_in_ramp() : () -> !cir.bool
+    %b = cir.coro.intrinsic.await.suspend.bool(%awaiter, %frame, @wrapper_bool) nothrow : (!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+    cir.coro.intrinsic.dead(%frame) : (!cir.ptr<!void>) -> ()
+    cir.return
+  }
+  // CHECK:      cir.coro.intrinsic.save
+  // CHECK-NEXT: cir.coro.intrinsic.is_in_ramp()
+  // CHECK-NEXT: cir.coro.intrinsic.await.suspend.bool
+  // CHECK-NEXT: cir.coro.intrinsic.dead
+  // CHECK-NEXT: cir.return
+
+  // Control: the same pipeline merges and erases side-effect free operations.
+  // CHECK-LABEL: cir.func @pure_control
+  cir.func @pure_control(%p: !cir.ptr<!s32i>) -> !cir.bool {
+    %a = cir.cast bitcast %p : !cir.ptr<!s32i> -> !cir.ptr<!void>
+    %b = cir.cast bitcast %p : !cir.ptr<!s32i> -> !cir.ptr<!void>
+    %unused = cir.cast bitcast %p : !cir.ptr<!s32i> -> !cir.ptr<!cir.ptr<!void>>
+    %eq = cir.cmp eq %a, %b : !cir.ptr<!void>
+    cir.return %eq : !cir.bool
+  }
+  // CHECK-NEXT: %[[A:.*]] = cir.cast bitcast
+  // CHECK-NEXT: cir.cmp eq %[[A]], %[[A]]
+}

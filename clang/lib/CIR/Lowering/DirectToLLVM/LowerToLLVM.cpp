@@ -2392,6 +2392,96 @@ mlir::LogicalResult CIRToLLVMTryCallOpLowering::matchAndRewrite(
                              op.getUnwindDest());
 }
 
+void createLLVMFuncOpIfNotExist(mlir::ConversionPatternRewriter &rewriter,
+                                mlir::SymbolTableCollection &symbolTables,
+                                mlir::Operation *srcOp, llvm::StringRef fnName,
+                                mlir::Type fnTy,
+                                mlir::ArrayAttr argAttrs = nullptr,
+                                mlir::ArrayAttr resAttrs = nullptr) {
+  mlir::ModuleOp modOp = srcOp->getParentOfType<mlir::ModuleOp>();
+  mlir::Operation *sourceSymbol = symbolTables.lookupSymbolIn(
+      modOp, mlir::StringAttr::get(fnTy.getContext(), fnName));
+  if (!sourceSymbol) {
+    mlir::OpBuilder::InsertionGuard guard(rewriter);
+    auto enclosingFnOp = srcOp->getParentOfType<mlir::LLVM::LLVMFuncOp>();
+    rewriter.setInsertionPoint(enclosingFnOp);
+    auto fn =
+        mlir::LLVM::LLVMFuncOp::create(rewriter, srcOp->getLoc(), fnName, fnTy);
+    if (argAttrs)
+      fn.setArgAttrsAttr(argAttrs);
+    if (resAttrs)
+      fn.setResAttrsAttr(resAttrs);
+    // Update the symbol table.
+    symbolTables.getSymbolTable(fn->getParentOp()).insert(fn);
+  }
+}
+
+// Returns the declaration of the LLVM intrinsic llvm.coro.await.suspend.<kind>,
+// creating it if needed, and sets `fnTy` to its type. The await_suspend
+// wrapper calls are calls of this declaration rather than operations of the
+// LLVM dialect for these intrinsics, which cannot be marked nounwind or be
+// invoked.
+static mlir::FlatSymbolRefAttr
+getOrCreateAwaitSuspendDecl(llvm::StringRef kind, mlir::Type resultTy,
+                            mlir::Operation *srcOp,
+                            mlir::ConversionPatternRewriter &rewriter,
+                            mlir::SymbolTableCollection &symbolTables,
+                            mlir::LLVM::LLVMFunctionType &fnTy) {
+  mlir::MLIRContext *ctx = rewriter.getContext();
+  auto ptrTy = mlir::LLVM::LLVMPointerType::get(ctx);
+  std::string name = ("llvm.coro.await.suspend." + kind).str();
+  fnTy = mlir::LLVM::LLVMFunctionType::get(resultTy, {ptrTy, ptrTy, ptrTy});
+  createLLVMFuncOpIfNotExist(rewriter, symbolTables, srcOp, name, fnTy);
+  return mlir::FlatSymbolRefAttr::get(ctx, name);
+}
+
+// Lowers a cir.coro.intrinsic.await.suspend.* operation to a call of the
+// corresponding LLVM intrinsic, whose third argument is the address of the
+// wrapper. The call cannot unwind if the await_suspend call cannot throw.
+template <typename CIROp>
+static void lowerCoroAwaitSuspendOp(CIROp op, typename CIROp::Adaptor adaptor,
+                                    llvm::StringRef kind, mlir::Type resultTy,
+                                    mlir::ConversionPatternRewriter &rewriter,
+                                    mlir::SymbolTableCollection &symbolTables) {
+  mlir::LLVM::LLVMFunctionType fnTy;
+  mlir::FlatSymbolRefAttr callee = getOrCreateAwaitSuspendDecl(
+      kind, resultTy, op, rewriter, symbolTables, fnTy);
+  auto ptrTy = mlir::LLVM::LLVMPointerType::get(rewriter.getContext());
+  mlir::Value wrapper = mlir::LLVM::AddressOfOp::create(
+      rewriter, op.getLoc(), ptrTy, op.getWrapperAttr());
+  auto call = rewriter.replaceOpWithNewOp<mlir::LLVM::CallOp>(
+      op, fnTy, callee,
+      mlir::ValueRange{adaptor.getAwaiter(), adaptor.getFrame(), wrapper});
+  call.setNoUnwind(op.getNothrow());
+}
+
+mlir::LogicalResult CIRToLLVMCoroAwaitSuspendVoidOpLowering::matchAndRewrite(
+    cir::CoroAwaitSuspendVoidOp op, OpAdaptor adaptor,
+    mlir::ConversionPatternRewriter &rewriter) const {
+  lowerCoroAwaitSuspendOp(op, adaptor, "void",
+                          mlir::LLVM::LLVMVoidType::get(op.getContext()),
+                          rewriter, symbolTables);
+  return mlir::success();
+}
+
+mlir::LogicalResult CIRToLLVMCoroAwaitSuspendBoolOpLowering::matchAndRewrite(
+    cir::CoroAwaitSuspendBoolOp op, OpAdaptor adaptor,
+    mlir::ConversionPatternRewriter &rewriter) const {
+  lowerCoroAwaitSuspendOp(op, adaptor, "bool",
+                          getTypeConverter()->convertType(op.getType()),
+                          rewriter, symbolTables);
+  return mlir::success();
+}
+
+mlir::LogicalResult CIRToLLVMCoroAwaitSuspendHandleOpLowering::matchAndRewrite(
+    cir::CoroAwaitSuspendHandleOp op, OpAdaptor adaptor,
+    mlir::ConversionPatternRewriter &rewriter) const {
+  lowerCoroAwaitSuspendOp(op, adaptor, "handle",
+                          mlir::LLVM::LLVMVoidType::get(op.getContext()),
+                          rewriter, symbolTables);
+  return mlir::success();
+}
+
 mlir::LogicalResult CIRToLLVMReturnAddrOpLowering::matchAndRewrite(
     cir::ReturnAddrOp op, OpAdaptor adaptor,
     mlir::ConversionPatternRewriter &rewriter) const {
@@ -4672,30 +4762,6 @@ mlir::LogicalResult CIRToLLVMInsertMemberOpLowering::matchAndRewrite(
   rewriter.replaceOpWithNewOp<mlir::LLVM::InsertValueOp>(
       op, adaptor.getRecord(), adaptor.getValue(), indices);
   return mlir::success();
-}
-
-void createLLVMFuncOpIfNotExist(mlir::ConversionPatternRewriter &rewriter,
-                                mlir::SymbolTableCollection &symbolTables,
-                                mlir::Operation *srcOp, llvm::StringRef fnName,
-                                mlir::Type fnTy,
-                                mlir::ArrayAttr argAttrs = nullptr,
-                                mlir::ArrayAttr resAttrs = nullptr) {
-  mlir::ModuleOp modOp = srcOp->getParentOfType<mlir::ModuleOp>();
-  mlir::Operation *sourceSymbol = symbolTables.lookupSymbolIn(
-      modOp, mlir::StringAttr::get(fnTy.getContext(), fnName));
-  if (!sourceSymbol) {
-    mlir::OpBuilder::InsertionGuard guard(rewriter);
-    auto enclosingFnOp = srcOp->getParentOfType<mlir::LLVM::LLVMFuncOp>();
-    rewriter.setInsertionPoint(enclosingFnOp);
-    auto fn =
-        mlir::LLVM::LLVMFuncOp::create(rewriter, srcOp->getLoc(), fnName, fnTy);
-    if (argAttrs)
-      fn.setArgAttrsAttr(argAttrs);
-    if (resAttrs)
-      fn.setResAttrsAttr(resAttrs);
-    // Update the symbol table.
-    symbolTables.getSymbolTable(fn->getParentOp()).insert(fn);
-  }
 }
 
 mlir::LogicalResult CIRToLLVMThrowOpLowering::matchAndRewrite(

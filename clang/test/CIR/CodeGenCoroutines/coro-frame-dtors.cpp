@@ -46,10 +46,12 @@ struct TrivialTask {
 Task promise_dtor() { co_return; }
 
 // The promise's destructor is not scoped to initial_suspend, where the promise
-// is constructed, and runs only in destroy.
+// is constructed, and runs only in destroy. After the conditional deallocation,
+// coro.dead ends the lifetime of the frame.
 
 // CIR-LABEL: cir.func coroutine {{.*}} @_Z12promise_dtorv(
 // CIR:         %[[PROMISE:.*]] = cir.alloca "__promise"
+// CIR:         %[[BEGIN:.*]] = cir.coro.intrinsic.begin
 // CIR-NOT:     cir.cleanup.scope
 // CIR:         cir.coroutine initialSuspend : {
 // CIR-NOT:       {{cir.cleanup.scope|cir.call @_ZN4Task12promise_typeD1Ev}}
@@ -61,15 +63,20 @@ Task promise_dtor() { co_return; }
 // CIR-NEXT:      cir.call @_ZN4Task12promise_typeD1Ev(%[[PROMISE]])
 // CIR-NEXT:      %[[MEM:.*]] = cir.coro.intrinsic.free
 // CIR-NOT:       cir.call @_ZN4Task12promise_typeD1Ev
-// CIR:           cir.call @_ZdlPvm(%[[MEM]],
-// CIR-NOT:       cir.call @_ZN4Task12promise_typeD1Ev
-// CIR:         }, exit : {
+// CIR:           cir.call @_ZdlPvm(%[[MEM]],{{.*}}
+// CIR-NEXT:      }
+// CIR-NEXT:      cir.coro.intrinsic.dead(%[[BEGIN]])
+// CIR-NEXT:      cir.yield
+// CIR-NEXT:    }, exit : {
 // CIR-NOT:     cir.call @_ZN4Task12promise_typeD1Ev
 
 // OGCG-LABEL: define {{.*}} @_Z12promise_dtorv(
+// OGCG:         %[[BEGIN:.*]] = call ptr @llvm.coro.begin(
 // OGCG:       coro.cleanup:
 // OGCG-NEXT:    call void @_ZN4Task12promise_typeD1Ev(ptr {{.*}} %__promise)
 // OGCG:         call ptr @llvm.coro.free(
+// OGCG:       after.coro.free:
+// OGCG-NEXT:    call void @llvm.coro.dead(ptr %[[BEGIN]])
 
 TrivialTask param_dtor(Dtor p) {
   co_await std::suspend_always{};

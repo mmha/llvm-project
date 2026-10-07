@@ -5110,6 +5110,44 @@ def CIR_CoroEndOp : CIR_CoroIntrinsicOp<"end",
 }
 
 //===----------------------------------------------------------------------===//
+// Coroutine intrinsic IsInRampOp
+//===----------------------------------------------------------------------===//
+
+def CIR_CoroIsInRampOp : CIR_CoroIntrinsicOp<"is_in_ramp", (ins),
+    (outs CIR_AnyBoolType:$result)> {
+  let summary = "Represents llvm.coro.is_in_ramp";
+  let description = [{
+    Returns `true` when executed in the ramp function of a switched-resume
+    coroutine and `false` when executed in its resume or destroy function.
+    The ramp function runs the initial invocation until it returns to its
+    caller: after the coroutine first suspends, after it completes without
+    suspending, or when an exception leaves it. The coroutine splitting pass
+    replaces every occurrence with the constant that holds in the function it
+    ends up in.
+
+    It guards code that only the ramp function may run on paths shared with
+    the resume and destroy functions. For example, when an exception
+    propagates out of the coroutine, only the ramp function destroys its state
+    and frees the frame after `coro.intrinsic.end` before it continues
+    unwinding, and only the ramp function converts the result of
+    `get_return_object` to the return type of the coroutine.
+
+    The operation is not side-effect free, so it is never merged with, or
+    hoisted to, an occurrence before a suspend point. A value computed before
+    a suspend point and used after it is kept in the coroutine frame, and the
+    resume and destroy functions would reload the `true` that the ramp
+    function stored. Branch on the result where it is computed.
+
+    Example:
+
+    ```mlir
+    %in_ramp = cir.coro.intrinsic.is_in_ramp() : () -> !cir.bool
+    ```
+  }];
+  let llvmOp = "CoroIsInRampOp";
+}
+
+//===----------------------------------------------------------------------===//
 // Coroutine intrinsic FreeOp
 //===----------------------------------------------------------------------===//
 
@@ -5127,6 +5165,31 @@ def CIR_CoroFreeOp : CIR_CoroIntrinsicOp<"free",
 }
 
 //===----------------------------------------------------------------------===//
+// Coroutine intrinsic DeadOp
+//===----------------------------------------------------------------------===//
+
+def CIR_CoroDeadOp : CIR_CoroIntrinsicOp<"dead",
+    (ins CIR_VoidPtrType:$coroframe), (outs)> {
+  let summary = "Represents llvm.coro.dead";
+  let description = [{
+    Marks the end of the lifetime of the coroutine frame `coroframe`, the
+    handle produced by `coro.intrinsic.begin`. It follows the conditional
+    deallocation of the frame on the path that destroys the coroutine.
+
+    It is an optimization hint for heap allocation elision: it allows
+    coroutines that are not explicitly destroyed through
+    `coro.intrinsic.destroy` to be elided.
+
+    Example:
+
+    ```mlir
+    cir.coro.intrinsic.dead(%frame) : (!cir.ptr<!void>) -> ()
+    ```
+  }];
+  let llvmOp = "CoroDeadOp";
+}
+
+//===----------------------------------------------------------------------===//
 // Coroutine intrinsic SizeOp
 //===----------------------------------------------------------------------===//
 
@@ -5140,6 +5203,38 @@ def CIR_CoroSizeOp : CIR_CoroIntrinsicOp<"size", (ins),
 }
 
 //===----------------------------------------------------------------------===//
+// Coroutine intrinsic SaveOp
+//===----------------------------------------------------------------------===//
+
+def CIR_CoroSaveOp : CIR_CoroIntrinsicOp<"save",
+    (ins CIR_VoidPtrType:$handle),
+    (outs Token:$result), [TokenProducerTrait]> {
+  let summary = "Represents llvm.coro.save";
+  let description = [{
+    Marks the point where a coroutine updates its state so that it is
+    considered suspended and can be resumed from the suspend point that
+    consumes the returned token (`coro.intrinsic.suspend`). Operations
+    between the save and the suspend, such as the `await_suspend` call
+    (`coro.intrinsic.await.suspend.*`), may resume or destroy the coroutine,
+    possibly on another thread.
+
+    `handle` points to the coroutine handle of the enclosing coroutine. It
+    may be null; the LLVM coroutine passes do not use it.
+
+    Two saves must not be merged unless their suspend points are merged as
+    well, so this operation is not side-effect free.
+
+    Example:
+
+    ```mlir
+    %null = cir.const #cir.ptr<null> : !cir.ptr<!void>
+    %save = cir.coro.intrinsic.save(%null) : (!cir.ptr<!void>) -> token
+    ```
+  }];
+  let llvmOp = "CoroSaveOp";
+}
+
+//===----------------------------------------------------------------------===//
 // Coroutine intrinsic SuspendOp
 //===----------------------------------------------------------------------===//
 
@@ -5148,15 +5243,16 @@ def CIR_CoroSuspendOp : CIR_CoroIntrinsicOp<"suspend",
     (outs CIR_UInt8:$result), [TokenConsumerTrait]> {
   let summary = "Represents llvm.coro.suspend";
   let description = [{
-    `cir.coro.suspend` represents the `llvm.coro.suspend` intrinsic.
+    `cir.coro.intrinsic.suspend` represents the `llvm.coro.suspend`
+    intrinsic.
 
     It marks the point where execution of a switched-resume coroutine is
     suspended and control returns to the caller. The result value indicates
     how the coroutine should proceed: -1 if suspended, 0 if resumed, or 1
     if destroyed.
 
-    The `id` operand is the token produced by a `cir.coro.save` that marks
-    the point when the coroutine state is prepared for suspension.
+    The `id` operand is the token produced by a `cir.coro.intrinsic.save`
+    that marks the point when the coroutine state is prepared for suspension.
 
     The `final` operand indicates whether this is a final suspend point.
     If more than one suspend point is marked final, the resume and destroy
@@ -5164,6 +5260,95 @@ def CIR_CoroSuspendOp : CIR_CoroIntrinsicOp<"suspend",
   }];
   let llvmOp = "CoroSuspendOp";
 }
+
+//===----------------------------------------------------------------------===//
+// Coroutine intrinsic AwaitSuspend{Void,Bool,Handle}Op
+//===----------------------------------------------------------------------===//
+
+class CIR_CoroAwaitSuspendOp<string kind, dag outs, string kindDescription>
+    : CIR_CoroIntrinsicOp<"await.suspend." # kind,
+        (ins CIR_VoidPtrType:$awaiter, CIR_VoidPtrType:$frame,
+             FlatSymbolRefAttr:$wrapper, UnitAttr:$nothrow),
+        outs, [DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Represents llvm.coro.await.suspend." # kind;
+  let description = [{
+    Calls the function `wrapper` with `awaiter`, a pointer to the awaiter
+    object, and the coroutine frame `frame`, the handle produced by
+    `coro.intrinsic.begin`. The wrapper performs the `await_suspend` call of
+    a `co_await` expression. The coroutine splitting pass replaces this
+    operation with a direct call to the wrapper.
+
+    The `await_suspend` call may resume or destroy the coroutine before it
+    returns, possibly on another thread. Hiding the call behind this
+    operation keeps it from being inlined into the unsplit coroutine, whose
+    control flow does not reflect that.
+
+    The operation must execute between the `coro.intrinsic.save` and the
+    `coro.intrinsic.suspend` of its suspend point. Inside the `suspend`
+    region of a `cir.await` both are implicit: the region starts after the
+    save and ends with the suspend.
+
+    `wrapper` must refer to a `cir.func` whose two parameters have the types
+    of `awaiter` and `frame`.
+
+    Like the `await_suspend` call it performs and the LLVM intrinsic, the
+    operation may throw. An exception from it unwinds through the cleanups
+    and to the handlers that enclose it, like one from a `cir.call`.
+    `nothrow` means that the `await_suspend` call cannot throw, so neither
+    can the operation.
+  }] # kindDescription;
+
+  let assemblyFormat = [{
+    `(` $awaiter `,` $frame `,` $wrapper `)` (`nothrow` $nothrow^)? `:`
+      functional-type(operands, results) attr-dict
+  }];
+}
+
+def CIR_CoroAwaitSuspendVoidOp : CIR_CoroAwaitSuspendOp<"void", (outs), [{
+
+    This is the form for an `await_suspend` that returns `void`. The wrapper
+    returns `void` as well.
+
+    Example:
+
+    ```mlir
+    cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @wrapper)
+        : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+    ```
+  }]>;
+
+def CIR_CoroAwaitSuspendBoolOp : CIR_CoroAwaitSuspendOp<"bool",
+    (outs CIR_AnyBoolType:$result), [{
+
+    This is the form for an `await_suspend` that returns `bool`. The wrapper
+    returns `!cir.bool`, and so does the operation: `true` keeps the
+    coroutine suspended, `false` resumes it immediately.
+
+    Example:
+
+    ```mlir
+    %suspend = cir.coro.intrinsic.await.suspend.bool(%awaiter, %frame, @wrapper)
+        : (!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+    ```
+  }]>;
+
+def CIR_CoroAwaitSuspendHandleOp : CIR_CoroAwaitSuspendOp<"handle", (outs), [{
+
+    This is the form for an `await_suspend` that returns a
+    `std::coroutine_handle`. The wrapper returns the frame pointer of that
+    handle (its `address()`) as a `!cir.ptr<!void>`. The coroutine splitting
+    pass resumes the returned coroutine right after the wrapper call
+    (symmetric transfer), with a tail call where the target supports it, so
+    the operations that follow this one are never reached in the resume and
+    destroy functions.
+
+    Example:
+
+    ```mlir
+    cir.coro.intrinsic.await.suspend.handle(%awaiter, %frame, @wrapper)
+        : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+    ```
+  }]>;
 
 //===----------------------------------------------------------------------===//
 // Coroutine intrinsic PromiseOp

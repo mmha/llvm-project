@@ -1,0 +1,89 @@
+// RUN: cir-opt %s --verify-roundtrip | FileCheck %s
+
+!u8i = !cir.int<u, 8>
+!void = !cir.void
+
+module {
+  cir.func private @wrapper_void(!cir.ptr<!void>, !cir.ptr<!void>)
+  cir.func private @wrapper_bool(!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+  cir.func private @wrapper_handle(!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.ptr<!void>
+
+  // CHECK-LABEL: cir.func @save
+  cir.func @save() {
+    %null = cir.const #cir.ptr<null> : !cir.ptr<!void>
+    %save = cir.coro.intrinsic.save(%null) : (!cir.ptr<!void>) -> token
+    cir.return
+  }
+  // CHECK: %[[NULL:.*]] = cir.const #cir.ptr<null> : !cir.ptr<!void>
+  // CHECK: %{{.*}} = cir.coro.intrinsic.save(%[[NULL]]) : (!cir.ptr<!void>) -> token
+
+  // CHECK-LABEL: cir.func @await_suspend_void
+  cir.func @await_suspend_void(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+    cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @wrapper_void) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+    cir.return
+  }
+  // CHECK-SAME: (%[[AWAITER:.*]]: !cir.ptr<!void>, %[[FRAME:.*]]: !cir.ptr<!void>)
+  // CHECK: cir.coro.intrinsic.await.suspend.void(%[[AWAITER]], %[[FRAME]], @wrapper_void) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+
+  // CHECK-LABEL: cir.func @await_suspend_bool
+  cir.func @await_suspend_bool(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) -> !cir.bool {
+    %0 = cir.coro.intrinsic.await.suspend.bool(%awaiter, %frame, @wrapper_bool) : (!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+    cir.return %0 : !cir.bool
+  }
+  // CHECK-SAME: (%[[AWAITER:.*]]: !cir.ptr<!void>, %[[FRAME:.*]]: !cir.ptr<!void>)
+  // CHECK: %[[SUSPEND:.*]] = cir.coro.intrinsic.await.suspend.bool(%[[AWAITER]], %[[FRAME]], @wrapper_bool) : (!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+  // CHECK: cir.return %[[SUSPEND]] : !cir.bool
+
+  // The await_suspend calls cannot throw.
+  // CHECK-LABEL: cir.func @await_suspend_nothrow
+  cir.func @await_suspend_nothrow(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) -> !cir.bool {
+    cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @wrapper_void) nothrow : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+    cir.coro.intrinsic.await.suspend.handle(%awaiter, %frame, @wrapper_handle) nothrow : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+    %0 = cir.coro.intrinsic.await.suspend.bool(%awaiter, %frame, @wrapper_bool) nothrow : (!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+    cir.return %0 : !cir.bool
+  }
+  // CHECK-SAME: (%[[AWAITER:.*]]: !cir.ptr<!void>, %[[FRAME:.*]]: !cir.ptr<!void>)
+  // CHECK: cir.coro.intrinsic.await.suspend.void(%[[AWAITER]], %[[FRAME]], @wrapper_void) nothrow : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+  // CHECK: cir.coro.intrinsic.await.suspend.handle(%[[AWAITER]], %[[FRAME]], @wrapper_handle) nothrow : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+  // CHECK: %{{.*}} = cir.coro.intrinsic.await.suspend.bool(%[[AWAITER]], %[[FRAME]], @wrapper_bool) nothrow : (!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+
+  // CHECK-LABEL: cir.func @await_suspend_handle
+  cir.func @await_suspend_handle(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+    cir.coro.intrinsic.await.suspend.handle(%awaiter, %frame, @wrapper_handle) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+    cir.return
+  }
+  // CHECK-SAME: (%[[AWAITER:.*]]: !cir.ptr<!void>, %[[FRAME:.*]]: !cir.ptr<!void>)
+  // CHECK: cir.coro.intrinsic.await.suspend.handle(%[[AWAITER]], %[[FRAME]], @wrapper_handle) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+
+  // The suspend protocol of a co_await: the token of the save feeds the
+  // suspend point.
+  // CHECK-LABEL: cir.func @suspend_point
+  cir.func @suspend_point(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) -> !u8i {
+    %null = cir.const #cir.ptr<null> : !cir.ptr<!void>
+    %save = cir.coro.intrinsic.save(%null) : (!cir.ptr<!void>) -> token
+    cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @wrapper_void) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+    %false = cir.const #cir.bool<false> : !cir.bool
+    %0 = cir.coro.intrinsic.suspend(%save, %false) : (token, !cir.bool) -> !u8i
+    cir.return %0 : !u8i
+  }
+  // CHECK: %[[SAVE:.*]] = cir.coro.intrinsic.save(%{{.*}}) : (!cir.ptr<!void>) -> token
+  // CHECK: cir.coro.intrinsic.await.suspend.void
+  // CHECK: %[[FALSE:.*]] = cir.const #false
+  // CHECK: cir.coro.intrinsic.suspend(%[[SAVE]], %[[FALSE]]) : (token, !cir.bool) -> !u8i
+
+  // CHECK-LABEL: cir.func @is_in_ramp
+  cir.func @is_in_ramp() -> !cir.bool {
+    %0 = cir.coro.intrinsic.is_in_ramp() : () -> !cir.bool
+    cir.return %0 : !cir.bool
+  }
+  // CHECK: %[[IN_RAMP:.*]] = cir.coro.intrinsic.is_in_ramp() : () -> !cir.bool
+  // CHECK: cir.return %[[IN_RAMP]] : !cir.bool
+
+  // CHECK-LABEL: cir.func @dead
+  cir.func @dead(%frame: !cir.ptr<!void>) {
+    cir.coro.intrinsic.dead(%frame) : (!cir.ptr<!void>) -> ()
+    cir.return
+  }
+  // CHECK-SAME: (%[[FRAME:.*]]: !cir.ptr<!void>)
+  // CHECK: cir.coro.intrinsic.dead(%[[FRAME]]) : (!cir.ptr<!void>) -> ()
+}

@@ -1,0 +1,119 @@
+// RUN: cir-opt %s -cir-to-llvm -o - | FileCheck %s -check-prefix=MLIR
+// RUN: cir-opt %s -cir-to-llvm -o - | cir-translate -mlir-to-llvmir | FileCheck %s -check-prefix=LLVM
+
+!u8i = !cir.int<u, 8>
+!void = !cir.void
+
+module attributes {cir.triple = "x86_64-unknown-linux-gnu"} {
+  cir.func private @wrapper_void(!cir.ptr<!void>, !cir.ptr<!void>)
+  cir.func private @wrapper_bool(!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+  cir.func private @wrapper_handle(!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.ptr<!void>
+
+  // The suspend protocol of a co_await with a void await_suspend that cannot
+  // throw. The await_suspend wrapper calls are calls of the intrinsic
+  // declarations, which, unlike the intrinsic operations of the LLVM dialect,
+  // can be marked nounwind.
+  cir.func @suspend_void(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) -> !u8i {
+    %null = cir.const #cir.ptr<null> : !cir.ptr<!void>
+    %save = cir.coro.intrinsic.save(%null) : (!cir.ptr<!void>) -> token
+    cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @wrapper_void) nothrow : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+    %false = cir.const #cir.bool<false> : !cir.bool
+    %0 = cir.coro.intrinsic.suspend(%save, %false) : (token, !cir.bool) -> !u8i
+    cir.return %0 : !u8i
+  }
+
+  // MLIR: llvm.func @llvm.coro.await.suspend.void(!llvm.ptr, !llvm.ptr, !llvm.ptr){{$}}
+  // MLIR-LABEL: llvm.func @suspend_void
+  // MLIR-SAME: (%[[AWAITER:.*]]: !llvm.ptr, %[[FRAME:.*]]: !llvm.ptr) -> i8
+  // MLIR:   %[[NULL:.*]] = llvm.mlir.zero : !llvm.ptr
+  // MLIR:   %[[SAVE:.*]] = llvm.intr.coro.save %[[NULL]] : (!llvm.ptr) -> token
+  // MLIR:   %[[WRAPPER:.*]] = llvm.mlir.addressof @wrapper_void : !llvm.ptr
+  // MLIR:   llvm.call @llvm.coro.await.suspend.void(%[[AWAITER]], %[[FRAME]], %[[WRAPPER]]) {no_unwind} : (!llvm.ptr, !llvm.ptr, !llvm.ptr) -> ()
+  // MLIR:   %[[FALSE:.*]] = llvm.mlir.constant(false) : i1
+  // MLIR:   %{{.*}} = llvm.intr.coro.suspend %[[SAVE]], %[[FALSE]] : i8
+
+  // LLVM-LABEL: define i8 @suspend_void
+  // LLVM-SAME: (ptr %[[AWAITER:.*]], ptr %[[FRAME:.*]])
+  // LLVM:   %[[SAVE:.*]] = call token @llvm.coro.save(ptr null)
+  // LLVM:   call void @llvm.coro.await.suspend.void(ptr %[[AWAITER]], ptr %[[FRAME]], ptr @wrapper_void) #[[NOUNWIND:[0-9]+]]
+  // LLVM:   %{{.*}} = call i8 @llvm.coro.suspend(token %[[SAVE]], i1 false)
+
+  // The await_suspend calls of the next two functions may throw.
+  cir.func @suspend_bool(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) -> !cir.bool {
+    %0 = cir.coro.intrinsic.await.suspend.bool(%awaiter, %frame, @wrapper_bool) : (!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+    cir.return %0 : !cir.bool
+  }
+
+  // MLIR: llvm.func @llvm.coro.await.suspend.bool(!llvm.ptr, !llvm.ptr, !llvm.ptr) -> i1{{$}}
+  // MLIR-LABEL: llvm.func @suspend_bool
+  // MLIR-SAME: (%[[AWAITER:.*]]: !llvm.ptr, %[[FRAME:.*]]: !llvm.ptr) -> i1
+  // MLIR:   %[[WRAPPER:.*]] = llvm.mlir.addressof @wrapper_bool : !llvm.ptr
+  // MLIR:   %[[SUSPEND:.*]] = llvm.call @llvm.coro.await.suspend.bool(%[[AWAITER]], %[[FRAME]], %[[WRAPPER]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr) -> i1
+  // MLIR:   llvm.return %[[SUSPEND]] : i1
+
+  // LLVM-LABEL: define i1 @suspend_bool
+  // LLVM-SAME: (ptr %[[AWAITER:.*]], ptr %[[FRAME:.*]])
+  // LLVM:   %[[SUSPEND:.*]] = call i1 @llvm.coro.await.suspend.bool(ptr %[[AWAITER]], ptr %[[FRAME]], ptr @wrapper_bool){{$}}
+  // LLVM:   ret i1 %[[SUSPEND]]
+
+  cir.func @suspend_handle(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) {
+    cir.coro.intrinsic.await.suspend.handle(%awaiter, %frame, @wrapper_handle) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+    cir.return
+  }
+
+  // MLIR: llvm.func @llvm.coro.await.suspend.handle(!llvm.ptr, !llvm.ptr, !llvm.ptr){{$}}
+  // MLIR-LABEL: llvm.func @suspend_handle
+  // MLIR-SAME: (%[[AWAITER:.*]]: !llvm.ptr, %[[FRAME:.*]]: !llvm.ptr)
+  // MLIR:   %[[WRAPPER:.*]] = llvm.mlir.addressof @wrapper_handle : !llvm.ptr
+  // MLIR:   llvm.call @llvm.coro.await.suspend.handle(%[[AWAITER]], %[[FRAME]], %[[WRAPPER]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr) -> ()
+
+  // LLVM-LABEL: define void @suspend_handle
+  // LLVM-SAME: (ptr %[[AWAITER:.*]], ptr %[[FRAME:.*]])
+  // LLVM:   call void @llvm.coro.await.suspend.handle(ptr %[[AWAITER]], ptr %[[FRAME]], ptr @wrapper_handle){{$}}
+
+  // The other forms that cannot throw and the void form that may throw.
+  cir.func @suspend_nothrow(%awaiter: !cir.ptr<!void>, %frame: !cir.ptr<!void>) -> !cir.bool {
+    cir.coro.intrinsic.await.suspend.void(%awaiter, %frame, @wrapper_void) : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+    cir.coro.intrinsic.await.suspend.handle(%awaiter, %frame, @wrapper_handle) nothrow : (!cir.ptr<!void>, !cir.ptr<!void>) -> ()
+    %0 = cir.coro.intrinsic.await.suspend.bool(%awaiter, %frame, @wrapper_bool) nothrow : (!cir.ptr<!void>, !cir.ptr<!void>) -> !cir.bool
+    cir.return %0 : !cir.bool
+  }
+
+  // MLIR-LABEL: llvm.func @suspend_nothrow
+  // MLIR:   llvm.call @llvm.coro.await.suspend.void(%{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr) -> ()
+  // MLIR:   llvm.call @llvm.coro.await.suspend.handle(%{{.*}}, %{{.*}}, %{{.*}}) {no_unwind} : (!llvm.ptr, !llvm.ptr, !llvm.ptr) -> ()
+  // MLIR:   llvm.call @llvm.coro.await.suspend.bool(%{{.*}}, %{{.*}}, %{{.*}}) {no_unwind} : (!llvm.ptr, !llvm.ptr, !llvm.ptr) -> i1
+
+  // LLVM-LABEL: define i1 @suspend_nothrow
+  // LLVM:   call void @llvm.coro.await.suspend.void(ptr %{{.*}}, ptr %{{.*}}, ptr @wrapper_void){{$}}
+  // LLVM:   call void @llvm.coro.await.suspend.handle(ptr %{{.*}}, ptr %{{.*}}, ptr @wrapper_handle) #[[NOUNWIND]]
+  // LLVM:   call i1 @llvm.coro.await.suspend.bool(ptr %{{.*}}, ptr %{{.*}}, ptr @wrapper_bool) #[[NOUNWIND]]
+
+  cir.func @is_in_ramp() -> !cir.bool {
+    %0 = cir.coro.intrinsic.is_in_ramp() : () -> !cir.bool
+    cir.return %0 : !cir.bool
+  }
+
+  // MLIR-LABEL: llvm.func @is_in_ramp
+  // MLIR:   %[[IN_RAMP:.*]] = llvm.intr.coro.is_in_ramp : i1
+  // MLIR:   llvm.return %[[IN_RAMP]] : i1
+
+  // LLVM-LABEL: define i1 @is_in_ramp
+  // LLVM:   %[[IN_RAMP:.*]] = call i1 @llvm.coro.is_in_ramp()
+  // LLVM:   ret i1 %[[IN_RAMP]]
+
+  cir.func @dead(%frame: !cir.ptr<!void>) {
+    cir.coro.intrinsic.dead(%frame) : (!cir.ptr<!void>) -> ()
+    cir.return
+  }
+
+  // MLIR-LABEL: llvm.func @dead
+  // MLIR-SAME: (%[[FRAME:.*]]: !llvm.ptr)
+  // MLIR:   llvm.intr.coro.dead %[[FRAME]] : !llvm.ptr
+
+  // LLVM-LABEL: define void @dead
+  // LLVM-SAME: (ptr %[[FRAME:.*]])
+  // LLVM:   call void @llvm.coro.dead(ptr %[[FRAME]])
+
+  // LLVM: attributes #[[NOUNWIND]] = { nounwind }
+}

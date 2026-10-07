@@ -575,7 +575,8 @@ CIRGenFunction::emitCoroutineBody(const CoroutineBodyStmt &s) {
     };
 
     // Destroy the promise and the parameter copies, then emit
-    // "if (coro.free(CoroId, CoroBegin)) Deallocate;"
+    // "if (coro.free(CoroId, CoroBegin)) Deallocate; coro.dead(CoroBegin);"
+    // like CallCoroDelete in classic codegen.
     auto destroyBuilder = [&]() -> mlir::LogicalResult {
       frameCleanups.emitIntoCleanupRegion(openCurlyLoc);
 
@@ -617,6 +618,10 @@ CIRGenFunction::emitCoroutineBody(const CoroutineBodyStmt &s) {
         for (auto *op : opsToMove)
           op->moveBefore(yieldOp);
       }
+
+      // Mark the end of the lifetime of the frame. This allows heap allocation
+      // elision for a coroutine that is not destroyed explicitly.
+      cir::CoroDeadOp::create(builder, openCurlyLoc, curCoro.data->coroBegin);
 
       cir::YieldOp::create(builder, openCurlyLoc);
       return mlir::success();

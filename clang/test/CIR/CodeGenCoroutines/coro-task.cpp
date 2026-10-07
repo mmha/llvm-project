@@ -195,7 +195,8 @@ VoidTask silly_task() {
 //
 // `__builtin_coro_free` returns the frame pointer or null.
 // If null, no dynamic allocation happened, so nothing to free.
-// The `if` ensures we only call delete on non-null.
+// The `if` ensures we only call delete on non-null. coro.dead then ends the
+// lifetime of the frame, as in classic codegen.
 
 // CIR-NEXT: }, destroy : {
 
@@ -206,6 +207,7 @@ VoidTask silly_task() {
 // CIR-NEXT:     %[[Size:.*]] = cir.coro.intrinsic.size()
 // CIR-NEXT:     cir.call @_ZdlPvm(%[[FreeMem]], %[[Size]]){{.*}}
 // CIR-NEXT:   }
+// CIR-NEXT:   cir.coro.intrinsic.dead(%[[CoroFrameAddr]]) : (!cir.ptr<!void>) -> ()
 // CIR-NEXT:   cir.yield
 // CIR-NEXT: }, exit : {
 
@@ -218,6 +220,7 @@ VoidTask silly_task() {
 // OGCG:   call void @_ZdlPvm(ptr {{.*}} %[[FreeMem]], i64 {{.*}} %[[Size]])
 // OGCG:   br label %after.coro.free
 // OGCG: after.coro.free:
+// OGCG:   call void @llvm.coro.dead(ptr %[[CoroFrameAddr]])
 
 // Call builtin coro end and return
 

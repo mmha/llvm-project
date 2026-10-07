@@ -3876,6 +3876,67 @@ LogicalResult cir::CoroutineOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// CoroAwaitSuspend{Void,Bool,Handle}Op
+//===----------------------------------------------------------------------===//
+
+// Returns the wrapper function of a `cir.coro.intrinsic.await.suspend.*`
+// operation if the coroutine split can call it with the operation's awaiter
+// and frame operands. Emits an error and returns null otherwise.
+template <typename AwaitSuspendOp>
+static cir::FuncOp
+getVerifiedAwaitSuspendWrapper(AwaitSuspendOp op,
+                               SymbolTableCollection &symbolTable) {
+  FlatSymbolRefAttr wrapperAttr = op.getWrapperAttr();
+  auto fn = symbolTable.lookupNearestSymbolFrom<cir::FuncOp>(op, wrapperAttr);
+  if (!fn) {
+    op.emitOpError() << "'" << wrapperAttr.getValue()
+                     << "' does not reference a valid cir.func";
+    return {};
+  }
+
+  cir::FuncType fnType = fn.getFunctionType();
+  if (fnType.isVarArg() || fnType.getNumInputs() != 2 ||
+      fnType.getInput(0) != op.getAwaiter().getType() ||
+      fnType.getInput(1) != op.getFrame().getType()) {
+    op.emitOpError("wrapper parameters must match the types of the awaiter "
+                   "and frame operands");
+    return {};
+  }
+  return fn;
+}
+
+LogicalResult cir::CoroAwaitSuspendVoidOp::verifySymbolUses(
+    SymbolTableCollection &symbolTable) {
+  cir::FuncOp fn = getVerifiedAwaitSuspendWrapper(*this, symbolTable);
+  if (!fn)
+    return failure();
+  if (!fn.getFunctionType().hasVoidReturn())
+    return emitOpError("wrapper must return void");
+  return success();
+}
+
+LogicalResult cir::CoroAwaitSuspendBoolOp::verifySymbolUses(
+    SymbolTableCollection &symbolTable) {
+  cir::FuncOp fn = getVerifiedAwaitSuspendWrapper(*this, symbolTable);
+  if (!fn)
+    return failure();
+  if (fn.getFunctionType().getReturnType() != getType())
+    return emitOpError("wrapper must return ") << getType();
+  return success();
+}
+
+LogicalResult cir::CoroAwaitSuspendHandleOp::verifySymbolUses(
+    SymbolTableCollection &symbolTable) {
+  cir::FuncOp fn = getVerifiedAwaitSuspendWrapper(*this, symbolTable);
+  if (!fn)
+    return failure();
+  auto ptrTy = dyn_cast<cir::PointerType>(fn.getFunctionType().getReturnType());
+  if (!ptrTy || !isa<cir::VoidType>(ptrTy.getPointee()))
+    return emitOpError("wrapper must return a pointer to void");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // CopyOp Definitions
 //===----------------------------------------------------------------------===//
 
