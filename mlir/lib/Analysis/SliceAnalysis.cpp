@@ -152,31 +152,32 @@ static LogicalResult getBackwardSliceImpl(Operation *op,
     return success();
   };
 
-  bool succeeded = true;
-
   if (!options.omitUsesFromAbove &&
       !op->hasTrait<OpTrait::IsIsolatedFromAbove>()) {
-    llvm::for_each(op->getRegions(), [&](Region &region) {
+    for (Region &region : op->getRegions()) {
       // Walk this region recursively to collect the regions that descend from
       // this op's nested regions (inclusive).
       SmallPtrSet<Region *, 4> descendents;
       region.walk(
           [&](Region *childRegion) { descendents.insert(childRegion); });
-      region.walk([&](Operation *op) {
+      WalkResult result = region.walk([&](Operation *op) {
         for (OpOperand &operand : op->getOpOperands()) {
-          if (!descendents.contains(operand.get().getParentRegion()))
-            if (!processValue(operand.get()).succeeded()) {
-              return WalkResult::interrupt();
-            }
+          if (!descendents.contains(operand.get().getParentRegion()) &&
+              failed(processValue(operand.get())))
+            return WalkResult::interrupt();
         }
         return WalkResult::advance();
       });
-    });
+      if (result.wasInterrupted())
+        return failure();
+    }
   }
-  llvm::for_each(op->getOperands(), processValue);
+  for (Value operand : op->getOperands())
+    if (failed(processValue(operand)))
+      return failure();
 
   backwardSlice->insert(op);
-  return success(succeeded);
+  return success();
 }
 
 LogicalResult mlir::getBackwardSlice(Operation *op,
