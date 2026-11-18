@@ -719,6 +719,14 @@ public:
                         bool isVolatile = false,
                         AggValueSlot slot = AggValueSlot::ignored());
 
+  /// Atomically replace the value of the scalar atomic object \p lvalue by
+  /// update(old), with a seq_cst load and a loop of strong seq_cst
+  /// compare-exchanges (C11 6.5.16.2p3). Returns the new value of the
+  /// successful iteration, or a null value after reporting an NYI error.
+  mlir::Value emitAtomicCompareExchangeLoop(
+      LValue lvalue, SourceRange range,
+      llvm::function_ref<mlir::Value(mlir::Value)> update);
+
   /// An abstract representation of regular/ObjC call/message targets.
   class AbstractCallee {
     /// The function declaration of the callee.

@@ -150,6 +150,11 @@ public:
   /// Creates temp alloca for intermediate operations on atomic value.
   Address createTempAlloca() const;
 
+  std::pair<RValue, mlir::Value>
+  emitAtomicCompareExchange(RValue expected, RValue desired,
+                            cir::MemOrder success, cir::MemOrder failure,
+                            bool isWeak);
+
 private:
   bool requiresMemSetZero(mlir::Type ty) const;
 
@@ -396,6 +401,14 @@ mlir::Value AtomicInfo::convertRValueToInt(RValue rvalue, mlir::Location loc,
     if (!shouldCastToInt(value.getType(), cmpxchg))
       return cgf.emitToMemory(value, valueTy);
 
+    CIRGenBuilderTy &builder = cgf.getBuilder();
+    cir::IntType intTy = builder.getUIntNTy(atomicSizeInBits);
+    if (mlir::isa<cir::BoolType>(value.getType()))
+      return builder.createCast(loc, cir::CastKind::bool_to_int, value, intTy);
+    if (auto fpTy = mlir::dyn_cast<cir::FPTypeInterface>(value.getType());
+        fpTy && fpTy.getWidth() == atomicSizeInBits)
+      return builder.createBitcast(loc, value, intTy);
+
     cgf.cgm.errorNYI(
         loc, "AtomicInfo::convertRValueToInt: cast scalar rvalue to int");
     return nullptr;
@@ -431,6 +444,15 @@ RValue AtomicInfo::convertToValueOrAtomic(mlir::Value intVal,
              "Different integer types.");
       return RValue::get(cgf.emitFromMemory(intVal, valueTy));
     }
+
+    CIRGenBuilderTy &builder = cgf.getBuilder();
+    auto intTy = mlir::dyn_cast<cir::IntType>(intVal.getType());
+    if (intTy && mlir::isa<cir::BoolType>(valTy))
+      return RValue::get(builder.createCast(
+          intVal.getLoc(), cir::CastKind::int_to_bool, intVal, valTy));
+    if (auto fpTy = mlir::dyn_cast<cir::FPTypeInterface>(valTy);
+        intTy && fpTy && fpTy.getWidth() == intTy.getWidth())
+      return RValue::get(builder.createBitcast(intVal.getLoc(), intVal, valTy));
 
     cgf.cgm.errorNYI("convertToValueOrAtomic: convert through bitcast");
     return RValue::get(nullptr);
@@ -499,6 +521,38 @@ Address AtomicInfo::materializeRValue(RValue rvalue, mlir::Location loc) const {
 
   atomics.emitCopyIntoMemory(rvalue);
   return tempLV.getAddress();
+}
+
+std::pair<RValue, mlir::Value>
+AtomicInfo::emitAtomicCompareExchange(RValue expected, RValue desired,
+                                      cir::MemOrder success,
+                                      cir::MemOrder failure, bool isWeak) {
+  assert(lvalue.isSimple() && !shouldUseLibCall() &&
+         "the caller must rule out the library call");
+  CIRGenBuilderTy &builder = cgf.getBuilder();
+
+  mlir::Value expectedVal = convertRValueToInt(expected, loc, /*cmpxchg=*/true);
+  mlir::Value desiredVal = convertRValueToInt(desired, loc, /*cmpxchg=*/true);
+
+  Address addr = getAtomicAddress();
+  if (expectedVal.getType() != addr.getElementType())
+    addr = castToAtomicIntPointer(addr);
+
+  auto cmpxchg = cir::AtomicCmpXchgOp::create(
+      builder, loc, expectedVal.getType(), builder.getBoolTy(),
+      addr.getPointer(), expectedVal, desiredVal,
+      cir::MemOrderAttr::get(&cgf.getMLIRContext(), success),
+      cir::MemOrderAttr::get(&cgf.getMLIRContext(), failure),
+      cir::SyncScopeKindAttr::get(&cgf.getMLIRContext(),
+                                  cir::SyncScopeKind::System),
+      builder.getI64IntegerAttr(addr.getAlignment().getQuantity()));
+  cmpxchg.setIsVolatile(lvalue.isVolatileQualified());
+  cmpxchg.setWeak(isWeak);
+
+  RValue old = convertToValueOrAtomic(cmpxchg.getOld(), AggValueSlot::ignored(),
+                                      SourceLocation(), /*asValue=*/false,
+                                      /*cmpxchg=*/true);
+  return {old, cmpxchg.getSuccess()};
 }
 
 static void emitDefaultCaseLabel(CIRGenBuilderTy &builder, mlir::Location loc) {
@@ -1813,6 +1867,83 @@ void CIRGenFunction::emitAtomicStore(RValue rvalue, LValue dest,
 
   cgm.errorNYI(loc, "emitAtomicStore: non-simple atomic lvalue");
   assert(!cir::MissingFeatures::opLoadStoreAtomic());
+}
+
+mlir::Value CIRGenFunction::emitAtomicCompareExchangeLoop(
+    LValue lvalue, SourceRange range,
+    llvm::function_ref<mlir::Value(mlir::Value)> update) {
+  mlir::Location loc = getLoc(range);
+  if (!lvalue.isSimple()) {
+    cgm.errorNYI(range, "atomic compare-exchange loop: non-simple lvalue");
+    return {};
+  }
+
+  AtomicInfo atomics(*this, lvalue, loc);
+  if (atomics.getEvaluationKind() != cir::TEK_Scalar) {
+    cgm.errorNYI(range, "atomic compare-exchange loop: non-scalar type");
+    return {};
+  }
+  if (atomics.shouldUseLibCall()) {
+    assert(!cir::MissingFeatures::atomicUseLibCall());
+    cgm.errorNYI(range, "atomic compare-exchange loop: library call");
+    return {};
+  }
+  if (atomics.hasPadding()) {
+    cgm.errorNYI(range, "atomic compare-exchange loop: type with padding");
+    return {};
+  }
+  mlir::Type memTy = convertTypeForMem(atomics.getValueType());
+  uint64_t atomicSizeInBits = getContext().getTypeSize(atomics.getAtomicType());
+  auto intTy = mlir::dyn_cast<cir::IntType>(memTy);
+  auto fpTy = mlir::dyn_cast<cir::FPTypeInterface>(memTy);
+  if (!mlir::isa<cir::PointerType, cir::BoolType>(memTy) &&
+      !(intTy && intTy.getWidth() == atomicSizeInBits) &&
+      !(fpTy && fpTy.getWidth() == atomicSizeInBits)) {
+    cgm.errorNYI(range, "atomic compare-exchange loop: value type");
+    return {};
+  }
+
+  mlir::Value init =
+      atomics
+          .emitAtomicLoad(AggValueSlot::ignored(), range.getBegin(),
+                          /*asValue=*/true,
+                          cir::MemOrder::SequentiallyConsistent,
+                          lvalue.isVolatileQualified())
+          .getValue();
+  if (!init)
+    return {};
+  mlir::Type valueTy = init.getType();
+  CharUnits valueAlign =
+      getContext().getTypeAlignInChars(atomics.getValueType());
+  Address oldAddr = createTempAlloca(valueTy, valueAlign, loc, "atomic.old");
+  Address newAddr = createTempAlloca(valueTy, valueAlign, loc, "atomic.new");
+  builder.createStore(loc, init, oldAddr);
+
+  builder.createDoWhile(
+      loc,
+      /*condBuilder=*/
+      [&](mlir::OpBuilder &, mlir::Location loc) {
+        mlir::Value expected = builder.createLoad(loc, oldAddr);
+        mlir::Value desired = builder.createLoad(loc, newAddr);
+        auto [old, success] = atomics.emitAtomicCompareExchange(
+            RValue::get(expected), RValue::get(desired),
+            cir::MemOrder::SequentiallyConsistent,
+            cir::MemOrder::SequentiallyConsistent, /*isWeak=*/false);
+        builder.createStore(loc, old.getValue(), oldAddr);
+        builder.createCondition(builder.createNot(loc, success));
+      },
+      /*bodyBuilder=*/
+      [&](mlir::OpBuilder &, mlir::Location loc) {
+        mlir::Value old = builder.createLoad(loc, oldAddr);
+        mlir::Value desired = update(old);
+        if (!desired)
+          desired = old;
+        assert(desired.getType() == valueTy && "update changed the type");
+        builder.createStore(loc, desired, newAddr);
+        builder.createYield(loc);
+      });
+
+  return builder.createLoad(loc, newAddr);
 }
 
 void CIRGenFunction::emitAtomicInit(Expr *init, LValue dest) {

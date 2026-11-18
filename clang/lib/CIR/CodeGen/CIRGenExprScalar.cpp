@@ -1227,6 +1227,12 @@ public:
       const CompoundAssignOperator *e,
       mlir::Value (ScalarExprEmitter::*f)(const BinOpInfo &),
       mlir::Value &result);
+  LValue emitAtomicCompoundAssignLValue(
+      const CompoundAssignOperator *e,
+      mlir::Value (ScalarExprEmitter::*func)(const BinOpInfo &),
+      mlir::Value &result, BinOpInfo &opInfo, LValue lhsLV, QualType valueTy,
+      QualType promotionTypeLHS, QualType promotionTypeCR,
+      QualType promotionTypeRHS);
   mlir::Value
   emitCompoundAssign(const CompoundAssignOperator *e,
                      mlir::Value (ScalarExprEmitter::*f)(const BinOpInfo &));
@@ -1729,8 +1735,15 @@ LValue ScalarExprEmitter::emitCompoundAssignLValue(
     const CompoundAssignOperator *e,
     mlir::Value (ScalarExprEmitter::*func)(const BinOpInfo &),
     mlir::Value &result) {
-  if (e->getComputationResultType()->isAnyComplexType())
+  if (e->getComputationResultType()->isAnyComplexType()) {
+    if (e->getLHS()->getType()->isAtomicType()) {
+      cgf.cgm.errorNYI(e->getSourceRange(),
+                       "atomic compound assignment with a complex operand");
+      result = cgf.getUndefRValue(e->getType()).getValue();
+      return cgf.emitLValue(e->getLHS());
+    }
     return cgf.emitScalarCompoundAssignWithComplex(e, result);
+  }
 
   QualType lhsTy = e->getLHS()->getType();
   BinOpInfo opInfo;
@@ -1762,10 +1775,10 @@ LValue ScalarExprEmitter::emitCompoundAssignLValue(
   // Load/convert the LHS
   LValue lhsLV = cgf.emitLValue(e->getLHS());
 
-  if (lhsTy->getAs<AtomicType>()) {
-    cgf.cgm.errorNYI(result.getLoc(), "atomic lvalue assign");
-    return LValue();
-  }
+  if (const auto *atomicTy = lhsTy->getAs<AtomicType>())
+    return emitAtomicCompoundAssignLValue(
+        e, func, result, opInfo, lhsLV, atomicTy->getValueType(),
+        promotionTypeLHS, promotionTypeCR, promotionTypeRHS);
 
   opInfo.lhs = emitLoadOfLValue(lhsLV, e->getExprLoc());
 
@@ -1796,6 +1809,118 @@ LValue ScalarExprEmitter::emitCompoundAssignLValue(
 
   assert(!cir::MissingFeatures::openMPLastprivateConditional());
 
+  return lhsLV;
+}
+
+LValue ScalarExprEmitter::emitAtomicCompoundAssignLValue(
+    const CompoundAssignOperator *e,
+    mlir::Value (ScalarExprEmitter::*func)(const BinOpInfo &),
+    mlir::Value &result, BinOpInfo &opInfo, LValue lhsLV, QualType valueTy,
+    QualType promotionTypeLHS, QualType promotionTypeCR,
+    QualType promotionTypeRHS) {
+  SourceLocation loc = e->getExprLoc();
+  mlir::Location mlirLoc = cgf.getLoc(e->getSourceRange());
+  QualType resultTy = e->getComputationResultType();
+
+  bool canEmitAtomicRMW;
+  if (valueTy->isRealFloatingType()) {
+    auto fpTy = mlir::cast<cir::FPTypeInterface>(cgf.convertType(valueTy));
+    ASTContext &ctx = cgf.getContext();
+    canEmitAtomicRMW = !opInfo.fpFeatures.isFPConstrained() &&
+                       ctx.hasSameUnqualifiedType(valueTy, resultTy) &&
+                       ctx.hasSameUnqualifiedType(valueTy, promotionTypeCR) &&
+                       promotionTypeLHS.isNull() && promotionTypeRHS.isNull() &&
+                       llvm::has_single_bit(fpTy.getWidth());
+  } else {
+    canEmitAtomicRMW =
+        !valueTy->isBooleanType() && valueTy->isIntegerType() &&
+        resultTy->isIntegerType() &&
+        !(valueTy->isUnsignedIntegerType() &&
+          cgf.sanOpts.has(SanitizerKind::UnsignedIntegerOverflow)) &&
+        cgf.getLangOpts().getSignedOverflowBehavior() !=
+            LangOptions::SOB_Trapping;
+    // Unlike LLVM IR, the LLVM dialect has integer atomicrmw for 8, 16, 32
+    // and 64 bits only; wider integers (__int128) take the loop.
+    if (canEmitAtomicRMW) {
+      unsigned width =
+          mlir::cast<cir::IntType>(cgf.convertType(valueTy)).getWidth();
+      canEmitAtomicRMW = width <= 64;
+    }
+  }
+
+  std::optional<cir::AtomicFetchKind> fetchKind;
+  if (canEmitAtomicRMW) {
+    switch (opInfo.opcode) {
+    case BO_MulAssign:
+    case BO_DivAssign:
+    case BO_RemAssign:
+    case BO_ShlAssign:
+    case BO_ShrAssign:
+      break;
+    case BO_AddAssign:
+      fetchKind = cir::AtomicFetchKind::Add;
+      break;
+    case BO_SubAssign:
+      fetchKind = cir::AtomicFetchKind::Sub;
+      break;
+    case BO_AndAssign:
+      fetchKind = cir::AtomicFetchKind::And;
+      break;
+    case BO_XorAssign:
+      fetchKind = cir::AtomicFetchKind::Xor;
+      break;
+    case BO_OrAssign:
+      fetchKind = cir::AtomicFetchKind::Or;
+      break;
+    default:
+      llvm_unreachable("invalid compound assignment operator");
+    }
+  }
+
+  if (fetchKind) {
+    QualType rhsTy =
+        promotionTypeRHS.isNull() ? e->getRHS()->getType() : promotionTypeRHS;
+    mlir::Value amt = cgf.emitToMemory(
+        emitScalarConversion(opInfo.rhs, rhsTy, valueTy, loc), valueTy);
+    auto rmw = cir::AtomicFetchOp::create(
+        builder, mlirLoc, lhsLV.getPointer(), amt, *fetchKind,
+        cir::MemOrder::SequentiallyConsistent, cir::SyncScopeKind::System,
+        builder.getI64IntegerAttr(lhsLV.getAlignment().getQuantity()),
+        lhsLV.isVolatileQualified(), /*fetch_first=*/false);
+    result = rmw.getResult();
+    return lhsLV;
+  }
+
+  bool computesInFP = promotionTypeCR->isFloatingType() ||
+                      e->getComputationLHSType()->isFloatingType() ||
+                      valueTy->isFloatingType();
+  if (computesInFP &&
+      (opInfo.fpFeatures.getAllowFEnvAccess() ||
+       opInfo.fpFeatures.getExceptionMode() != LangOptions::FPE_Ignore)) {
+    cgf.cgm.errorNYI(e->getSourceRange(),
+                     "atomic compound assignment with observable "
+                     "floating-point exceptions");
+    result = cgf.getUndefRValue(e->getType()).getValue();
+    return lhsLV;
+  }
+  mlir::Value newVal = cgf.emitAtomicCompareExchangeLoop(
+      lhsLV, e->getSourceRange(), [&](mlir::Value old) {
+        CIRGenFunction::SourceLocRAIIObject sourceloc{cgf, e->getSourceRange()};
+        opInfo.lhs = emitScalarConversion(
+            cgf.emitFromMemory(old, valueTy), valueTy,
+            promotionTypeLHS.isNull() ? e->getComputationLHSType()
+                                      : promotionTypeLHS,
+            loc);
+        mlir::Value value = (this->*func)(opInfo);
+        if (!value)
+          return value;
+        value = emitScalarConversion(value, promotionTypeCR, valueTy, loc,
+                                     ScalarConversionOpts(cgf.sanOpts));
+        return cgf.emitToMemory(value, valueTy);
+      });
+  result = newVal ? cgf.emitFromMemory(newVal, valueTy)
+                  : cgf.getUndefRValue(e->getType()).getValue();
+  assert(!cir::MissingFeatures::openMPLastprivateConditional());
   return lhsLV;
 }
 
