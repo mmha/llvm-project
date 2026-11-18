@@ -2323,6 +2323,7 @@ void CIRGenModule::replaceUsesOfNonProtoTypeWithRealFunction(
       // Function addresses in global initializers use GlobalViewAttrs typed to
       // the initializer context (e.g. struct field type), not the FuncOp type,
       // so no update is required when the no-proto FuncOp is replaced.
+    } else if (mlir::isa<cir::DynamicCastOp>(use.getUser())) {
     } else {
       llvm_unreachable(
           "replaceUsesOfNonProtoTypeWithRealFunction: unexpected use type");

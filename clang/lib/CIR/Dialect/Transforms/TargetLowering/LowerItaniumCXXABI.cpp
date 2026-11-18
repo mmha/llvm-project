@@ -24,6 +24,7 @@
 #include "LowerModule.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "clang/CIR/Dialect/IR/CIRDialect.h"
+#include "clang/CIR/Dialect/Transforms/CIRTransformUtils.h"
 #include "llvm/Support/ErrorHandling.h"
 
 namespace cir {
@@ -735,9 +736,16 @@ static mlir::Value buildDynamicCastAfterNullCheck(cir::DynamicCastOp op,
   // TODO(cir): set the runtime calling convention to this call.
   assert(!cir::MissingFeatures::opFuncCallingConv());
 
-  mlir::Value castedPtr = cir::CallOp::create(builder, loc, dynCastFuncRef,
-                                              voidPtrTy, dynCastFuncArgs)
-                              .getResult();
+  auto dynCastFunc = mlir::SymbolTable::lookupNearestSymbolFrom<cir::FuncOp>(
+      op, dynCastFuncRef);
+  auto dynCastFuncTy = cir::FuncType::get(
+      llvm::to_vector(mlir::ValueRange(dynCastFuncArgs).getTypes()), voidPtrTy);
+  mlir::Value castedPtr =
+      (dynCastFunc ? cir::createRuntimeCall(builder, loc, dynCastFunc,
+                                            dynCastFuncTy, dynCastFuncArgs)
+                   : cir::CallOp::create(builder, loc, dynCastFuncRef,
+                                         voidPtrTy, dynCastFuncArgs))
+          .getResult();
 
   assert(mlir::isa<cir::PointerType>(castedPtr.getType()) &&
          "the return value of __dynamic_cast should be a ptr");

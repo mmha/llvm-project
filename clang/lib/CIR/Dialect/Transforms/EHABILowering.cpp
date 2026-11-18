@@ -262,9 +262,9 @@ void ItaniumEHLowering::ensureClangCallTerminate(mlir::Location loc) {
   builder.setInsertionPointToStart(entryBlock);
   mlir::Value exnArg = entryBlock->getArgument(0);
 
-  auto catchCall = cir::CallOp::create(
-      builder, loc, mlir::FlatSymbolRefAttr::get(beginCatchFunc), u8PtrType,
-      mlir::ValueRange{exnArg});
+  auto catchCall = cir::createRuntimeCall(
+      builder, loc, beginCatchFunc,
+      cir::FuncType::get({voidPtrType}, u8PtrType), mlir::ValueRange{exnArg});
   catchCall.setNothrowAttr(builder.getUnitAttr());
 
   auto terminateFuncDecl = getOrCreateRuntimeFuncDecl(
@@ -652,9 +652,10 @@ mlir::LogicalResult ItaniumEHLowering::lowerEhInitiate(
 
         auto [exnPtr, typeId] = ehTokenMap.lookup(op.getEhToken());
         builder.setInsertionPoint(op);
-        auto callOp = cir::CallOp::create(
-            builder, op.getLoc(), mlir::FlatSymbolRefAttr::get(beginCatchFunc),
-            u8PtrType, mlir::ValueRange{exnPtr});
+        auto callOp =
+            cir::createRuntimeCall(builder, op.getLoc(), beginCatchFunc,
+                                   cir::FuncType::get({voidPtrType}, u8PtrType),
+                                   mlir::ValueRange{exnPtr});
         mlir::Value castResult = callOp.getResult();
         mlir::Type expectedPtrType = op.getExnPtr().getType();
         if (castResult.getType() != expectedPtrType)
@@ -690,10 +691,10 @@ mlir::LogicalResult ItaniumEHLowering::lowerEhInitiate(
         auto [exnPtr, typeId] = ehTokenMap.lookup(op.getEhToken());
         ensureCxaCallUnexpectedDecl(op.getLoc());
         builder.setInsertionPoint(op);
-        auto call = cir::CallOp::create(
-            builder, op.getLoc(),
-            mlir::FlatSymbolRefAttr::get(cxaCallUnexpectedFunc), voidType,
-            mlir::ValueRange{exnPtr});
+        auto call =
+            cir::createRuntimeCall(builder, op.getLoc(), cxaCallUnexpectedFunc,
+                                   cir::FuncType::get({voidPtrType}, voidType),
+                                   mlir::ValueRange{exnPtr});
         call->setAttr(cir::CIRDialect::getNoReturnAttrName(),
                       builder.getUnitAttr());
         cir::UnreachableOp::create(builder, op.getLoc());
@@ -902,9 +903,9 @@ ItaniumEHLowering::lowerConstructCatchParam(cir::ConstructCatchParamOp op,
 
   // Call __cxa_get_exception_ptr to get the in-flight exception.
   builder.setInsertionPoint(op);
-  cir::CallOp getExnCall = cir::CallOp::create(
-      builder, loc, mlir::FlatSymbolRefAttr::get(getExceptionPtrFunc),
-      u8PtrType, mlir::ValueRange{exnPtr});
+  cir::CallOp getExnCall = cir::createRuntimeCall(
+      builder, loc, getExceptionPtrFunc,
+      cir::FuncType::get({voidPtrType}, u8PtrType), mlir::ValueRange{exnPtr});
   getExnCall.setNothrowAttr(builder.getUnitAttr());
   mlir::Value adjusted =
       cir::CastOp::create(builder, loc, paramAddrType, cir::CastKind::bitcast,
@@ -1012,8 +1013,9 @@ mlir::LogicalResult ItaniumEHLowering::lowerTryThrow(cir::TryThrowOp op) {
         cir::ConstPtrAttr::get(voidPtrType, builder.getI64IntegerAttr(0)));
   }
 
-  cir::TryCallOp::create(
-      builder, loc, mlir::FlatSymbolRefAttr::get(cxaThrowFunc), voidType,
+  cir::createRuntimeTryCall(
+      builder, loc, cxaThrowFunc,
+      cir::FuncType::get({voidPtrType, voidPtrType, voidPtrType}, voidType),
       normalDest, unwindDest, mlir::ValueRange{exnPtr, typeInfo, dtor});
   op.erase();
   return mlir::success();

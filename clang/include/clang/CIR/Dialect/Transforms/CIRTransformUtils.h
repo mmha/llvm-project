@@ -63,6 +63,54 @@ mlir::Block *replaceThrowWithTryThrow(cir::ThrowOp throwOp,
 void collectUnreachable(mlir::Operation *parent,
                         llvm::SmallVectorImpl<mlir::Operation *> &ops);
 
+inline mlir::Value getRuntimeCalleePointer(mlir::OpBuilder &builder,
+                                           mlir::Location loc,
+                                           cir::FuncOp callee,
+                                           cir::FuncType fnTy) {
+  if (callee.getFunctionType() == fnTy)
+    return {};
+  mlir::Value addr = cir::GetGlobalOp::create(
+      builder, loc, cir::PointerType::get(callee.getFunctionType()),
+      callee.getSymName());
+  return cir::CastOp::create(builder, loc, cir::PointerType::get(fnTy),
+                             cir::CastKind::bitcast, addr);
+}
+
+/// Create a call of type `fnTy` to the runtime function `callee`, directly if
+/// the types agree and through a cast pointer otherwise (see above).
+inline cir::CallOp createRuntimeCall(mlir::OpBuilder &builder,
+                                     mlir::Location loc, cir::FuncOp callee,
+                                     cir::FuncType fnTy,
+                                     mlir::ValueRange operands) {
+  mlir::Type resTy = fnTy.hasVoidReturn()
+                         ? mlir::Type(cir::VoidType::get(builder.getContext()))
+                         : fnTy.getReturnType();
+  if (mlir::Value ptr = getRuntimeCalleePointer(builder, loc, callee, fnTy)) {
+    llvm::SmallVector<mlir::Value> ops{ptr};
+    ops.append(operands.begin(), operands.end());
+    return cir::CallOp::create(builder, loc, mlir::SymbolRefAttr(), resTy, ops);
+  }
+  return cir::CallOp::create(builder, loc, mlir::FlatSymbolRefAttr::get(callee),
+                             resTy, operands);
+}
+
+/// Like createRuntimeCall, for a call that may unwind to `unwindDest`.
+inline cir::TryCallOp
+createRuntimeTryCall(mlir::OpBuilder &builder, mlir::Location loc,
+                     cir::FuncOp callee, cir::FuncType fnTy,
+                     mlir::Block *normalDest, mlir::Block *unwindDest,
+                     mlir::ValueRange operands) {
+  if (mlir::Value ptr = getRuntimeCalleePointer(builder, loc, callee, fnTy))
+    return cir::TryCallOp::create(builder, loc, ptr, fnTy, normalDest,
+                                  unwindDest, operands);
+  mlir::Type resTy = fnTy.hasVoidReturn()
+                         ? mlir::Type(cir::VoidType::get(builder.getContext()))
+                         : fnTy.getReturnType();
+  return cir::TryCallOp::create(builder, loc,
+                                mlir::FlatSymbolRefAttr::get(callee), resTy,
+                                normalDest, unwindDest, operands);
+}
+
 } // namespace cir
 
 #endif // LLVM_CLANG_CIR_DIALECT_TRANSFORMS_CIRTRANSFORMUTILS_H
