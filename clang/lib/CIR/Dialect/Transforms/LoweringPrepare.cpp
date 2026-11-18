@@ -388,6 +388,7 @@ struct LoweringPreparePass
   /// Tracks existing dynamic initializers.
   llvm::StringMap<uint32_t> dynamicInitializerNames;
   llvm::SmallVector<cir::FuncOp> dynamicInitializers;
+  llvm::DenseMap<mlir::Operation *, int64_t> dynamicInitOrder;
   /// Dynamic initializers with an explicit `init_priority` attribute,
   /// grouped by priority (keys kept in ascending order). Each group is
   /// emitted into its own `_GLOBAL__I_<priority>` function instead of being
@@ -2023,6 +2024,9 @@ void LoweringPreparePass::lowerGlobalOp(GlobalOp op) {
                      getTargetInfo().getTriple().isOSBinFormatWasm()))
         f.setComdat(comdat->empty() ? op.getSymName() : *comdat);
     } else {
+      if (auto order =
+              op->getAttrOfType<mlir::IntegerAttr>("cir.cxx_init_order"))
+        dynamicInitOrder[f] = order.getInt();
       dynamicInitializers.push_back(f);
     }
   } else if (op.getTlsModel() && op.getTlsRefs() && op.isDeclaration()) {
@@ -2315,6 +2319,13 @@ void LoweringPreparePass::buildCXXGlobalPriorityInitFuncs(
 }
 
 void LoweringPreparePass::buildCXXGlobalInitFunc() {
+  llvm::stable_sort(dynamicInitializers, [&](cir::FuncOp a, cir::FuncOp b) {
+    auto key = [&](cir::FuncOp f) {
+      auto it = dynamicInitOrder.find(f);
+      return it == dynamicInitOrder.end() ? INT64_MAX : it->second;
+    };
+    return key(a) < key(b);
+  });
   CIRBaseBuilderTy builder(getContext());
   builder.setInsertionPointToEnd(&mlirModule.getBodyRegion().back());
   mlir::Location loc = mlirModule.getLoc();

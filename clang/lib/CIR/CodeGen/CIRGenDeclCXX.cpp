@@ -111,11 +111,15 @@ void CIRGenModule::emitCXXGlobalVarDeclInitFunc(const VarDecl *vd,
   // that emitCXXGuardedInit/LoweringPrepare unconditionally assume here.
   assert(!cir::MissingFeatures::msabi());
 
+  auto it = delayedCXXInitPosition.find(vd);
+  unsigned order =
+      it != delayedCXXInitPosition.end() ? it->second : cxxGlobalInitCount++;
+  addr->setAttr(cxxInitOrderAttrName, builder.getI64IntegerAttr(order));
+
   if (addr.hasWeakLinkage() || addr.hasLinkOnceLinkage() ||
       (vd->getTLSKind() == VarDecl::TLS_Dynamic &&
-       isTemplateInstantiation(vd->getTemplateSpecializationKind()))) {
+       isTemplateInstantiation(vd->getTemplateSpecializationKind())))
     CIRGenFunction(*this, builder).emitCXXGuardedInit(*vd, addr, performInit);
-  } else {
+  else
     emitCXXGlobalVarDeclInit(vd, addr, performInit);
-  }
 }

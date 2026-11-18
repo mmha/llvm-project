@@ -250,6 +250,13 @@ public:
   void handleCXXStaticMemberVarInstantiation(VarDecl *vd);
 
   llvm::DenseMap<const Decl *, cir::GlobalOp> staticLocalDeclMap;
+
+  llvm::DenseMap<const Decl *, unsigned> delayedCXXInitPosition;
+  unsigned cxxGlobalInitCount = 0;
+
+  static constexpr llvm::StringLiteral cxxInitOrderAttrName =
+      "cir.cxx_init_order";
+
   llvm::DenseMap<const VarDecl *, cir::GlobalOp> initializerConstants;
 
   /// Cache for O(1) symbol lookups by name, replacing the O(N) linear scan

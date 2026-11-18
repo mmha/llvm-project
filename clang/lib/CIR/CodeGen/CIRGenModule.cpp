@@ -717,7 +717,9 @@ void CIRGenModule::emitGlobal(clang::GlobalDecl gd) {
 
   // If we're deferring emission of a C++ variable with an initializer, remember
   // the order in which it appeared on the file.
-  assert(!cir::MissingFeatures::deferredCXXGlobalInit());
+  if (getLangOpts().CPlusPlus && isa<VarDecl>(global) &&
+      cast<VarDecl>(global)->hasInit())
+    delayedCXXInitPosition.try_emplace(global, cxxGlobalInitCount++);
 
   llvm::StringRef mangledName = getMangledName(gd);
   if (getGlobalValue(mangledName) != nullptr) {
