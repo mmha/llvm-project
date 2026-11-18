@@ -184,7 +184,13 @@ void take_zero_width_and_fam(ZeroWidthAndFam *p) {}
 
 void take_packed(Packed p) {}
 // CIR: cir.func{{.*}} @take_packed(%arg0: !u64i loc
+// CIR:   %[[P:.+]] = cir.alloca "p" align(1)
+// CIR:   cir.copy %{{.+}} align(8) to %[[P]] align(1) : !cir.ptr<!rec_Packed>
 // LLVM: define{{.*}} void @take_packed(i64 %{{.+}})
+// LLVM-CIR:  %[[P:.+]] = alloca %struct.Packed, align 1
+// LLVM-CIR:  call void @llvm.memcpy.p0.p0.i64(ptr align 1 %[[P]], ptr align 8 %{{.+}}, i64 8, i1 false)
+// LLVM-OGCG: %[[P:.+]] = alloca %struct.Packed, align 1
+// LLVM-OGCG: store i64 %{{.+}}, ptr %[[P]], align 1
 
 void take_ms_tail(MsTail t) {}
 // CIR: cir.func{{.*}} @take_ms_tail(%arg0: !u64i loc
