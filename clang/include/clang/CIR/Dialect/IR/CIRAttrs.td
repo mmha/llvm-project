@@ -2813,14 +2813,19 @@ def CIR_LoweringOptionsAttr
     `enable_noundef_attrs` mirrors `CodeGenOptions::EnableNoundefAttrs`,
     which calling convention lowering reads when it decides whether an
     argument is `noundef`. `ssp_buffer_size` mirrors
-    `CodeGenOptions::SSPBufferSize`.
+    `CodeGenOptions::SSPBufferSize`. `disable_tail_calls` mirrors
+    `CodeGenOptions::DisableTailCalls` (`-fno-optimize-sibling-calls`); it is
+    omitted when false.
 
     `LowerToLLVM` turns `no_trapping_math` and `ssp_buffer_size` into the
     `"no-trapping-math"` and `"stack-protector-buffer-size"` LLVM function
     attributes of every function not marked `runtime_func`. A `strictfp`
     function does not get `"no-trapping-math"`, since a pragma such as
     `float_control(except, on)` can make its FP operations observe exceptions
-    even when the TU-wide default ignores them.
+    even when the TU-wide default ignores them. `disable_tail_calls` likewise
+    becomes `"disable-tail-calls"="true"` on every such function, including
+    the ones lowering generates without a declaration (e.g. the dynamic
+    initializers of global variables).
 
     Example:
     ```
@@ -2849,7 +2854,8 @@ def CIR_LoweringOptionsAttr
     "bool":$enable_noundef_attrs,
     "bool":$no_trapping_math,
     "uint32_t":$ssp_buffer_size,
-    DefaultValuedParameter<"bool", "false">:$relative_cxx_abi_vtables
+    DefaultValuedParameter<"bool", "false">:$relative_cxx_abi_vtables,
+    DefaultValuedParameter<"bool", "false">:$disable_tail_calls
   );
 
   let assemblyFormat = [{
@@ -2857,7 +2863,8 @@ def CIR_LoweringOptionsAttr
                $hlsl, $sycl_is_device, $gpu_rdc, $openmp,
                $openmp_is_target_device, $clang_abi_compat, $long_double_size,
                $enable_noundef_attrs, $no_trapping_math,
-               $ssp_buffer_size, $relative_cxx_abi_vtables) `>`
+               $ssp_buffer_size, $relative_cxx_abi_vtables,
+               $disable_tail_calls) `>`
   }];
 
   let canHaveIllegalCXXABIType = 0;

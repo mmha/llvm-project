@@ -3350,10 +3350,13 @@ mlir::LogicalResult CIRToLLVMFuncOpLowering::matchAndRewrite(
 
   // Every function but a runtime function gets the TU-wide default function
   // attributes.
+  bool disableTailCalls =
+      op->hasAttr(CIRDialect::getDisableTailCallsAttrName());
   if (!op->hasAttr(CIRDialect::getRuntimeFuncAttrName())) {
     if (auto langOpts = op->getParentOfType<mlir::ModuleOp>()
                             ->getAttrOfType<cir::LoweringOptionsAttr>(
                                 CIRDialect::getLoweringOptionsAttrName())) {
+      disableTailCalls |= langOpts.getDisableTailCalls();
       // A strictfp function may use a pragma to observe FP exceptions locally,
       // so the TU-wide default does not apply to it.
       if (langOpts.getNoTrappingMath() &&
@@ -3365,6 +3368,10 @@ mlir::LogicalResult CIRToLLVMFuncOpLowering::matchAndRewrite(
            llvm::utostr(langOpts.getSspBufferSize())}));
     }
   }
+
+  if (disableTailCalls)
+    passthrough.push_back(
+        rewriter.getStrArrayAttr({"disable-tail-calls", "true"}));
 
   if (op.getCoroutineKind())
     passthrough.push_back(rewriter.getStringAttr("presplitcoroutine"));

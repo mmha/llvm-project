@@ -86,6 +86,9 @@ def CIR_Dialect : Dialect {
     static llvm::StringRef getMinSizeAttrName() { return "minsize"; }
     static llvm::StringRef getOptNoneAttrName() { return "optnone"; }
     static llvm::StringRef getNakedAttrName() { return "naked"; }
+    static llvm::StringRef getDisableTailCallsAttrName() {
+      return "disable_tail_calls";
+    }
     // Note: we have to name this with the underscore instead of the dash like
     // traditional LLVM-IR does, because the LLVM-IR-Dialect doesn't have a way
     // of forming names with a dash instead of underscore in its auto-generated

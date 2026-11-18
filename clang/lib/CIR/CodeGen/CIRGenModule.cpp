@@ -222,7 +222,8 @@ CIRGenModule::CIRGenModule(mlir::MLIRContext &mlirContext,
           /*no_trapping_math=*/langOpts.getDefaultExceptionMode() ==
               LangOptions::FPE_Ignore,
           /*ssp_buffer_size=*/cgo.SSPBufferSize,
-          /*relative_cxx_abi_vtables=*/langOpts.RelativeCXXABIVTables));
+          /*relative_cxx_abi_vtables=*/langOpts.RelativeCXXABIVTables,
+          /*disable_tail_calls=*/cgo.DisableTailCalls));
 
   if (cgo.OptimizationLevel > 0 || cgo.OptimizeSize > 0)
     getModule()->setAttr(cir::CIRDialect::getOptInfoAttrName(),
@@ -3574,6 +3575,11 @@ void CIRGenModule::setCIRFunctionAttributesForDefinition(
   assert(!cir::MissingFeatures::opFuncArmStreamingAttr());
   assert(!cir::MissingFeatures::opFuncArmNewAttr());
   assert(!cir::MissingFeatures::hlsl());
+
+  if (decl->hasAttr<DisableTailCallsAttr>() ||
+      decl->hasAttr<AnyX86InterruptAttr>())
+    f->setAttr(cir::CIRDialect::getDisableTailCallsAttrName(),
+               mlir::UnitAttr::get(&getMLIRContext()));
 
   // Track whether we need to add the optnone attribute, starting with the
   // default for this optimization level.
