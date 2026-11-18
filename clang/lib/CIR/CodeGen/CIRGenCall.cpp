@@ -693,9 +693,9 @@ void CIRGenModule::constructFunctionReturnAttributes(
     if (const auto *refTy = retTy->getAs<ReferenceType>()) {
       QualType pointeeTy = refTy->getPointeeType();
       if (!pointeeTy->isIncompleteType() && pointeeTy->isConstantSizeType())
-        retAttrs.set(mlir::LLVM::LLVMDialect::getDereferenceableAttrName(),
-                     builder.getI64IntegerAttr(
-                         getMinimumObjectSize(pointeeTy).getQuantity()));
+        if (uint64_t bytes = getMinimumObjectSize(pointeeTy).getQuantity())
+          retAttrs.set(mlir::LLVM::LLVMDialect::getDereferenceableAttrName(),
+                       builder.getI64IntegerAttr(bytes));
 
       if (getTypes().getTargetAddressSpace(pointeeTy) == 0 &&
           !codeGenOpts.NullPointerIsValid)
@@ -810,9 +810,9 @@ void CIRGenModule::constructFunctionArgumentAttributes(
     if (const auto *refTy = argType->getAs<ReferenceType>()) {
       QualType pointeeTy = refTy->getPointeeType();
       if (!pointeeTy->isIncompleteType() && pointeeTy->isConstantSizeType())
-        argAttrList.set(mlir::LLVM::LLVMDialect::getDereferenceableAttrName(),
-                        builder.getI64IntegerAttr(
-                            getMinimumObjectSize(pointeeTy).getQuantity()));
+        if (uint64_t bytes = getMinimumObjectSize(pointeeTy).getQuantity())
+          argAttrList.set(mlir::LLVM::LLVMDialect::getDereferenceableAttrName(),
+                          builder.getI64IntegerAttr(bytes));
       if (getTypes().getTargetAddressSpace(pointeeTy) == 0 &&
           !codeGenOpts.NullPointerIsValid)
         argAttrList.set(mlir::LLVM::LLVMDialect::getNonNullAttrName(),

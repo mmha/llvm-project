@@ -44,6 +44,16 @@ Aligned32 &return_aligned_ref() { return ga; }
   // CIR: cir.func {{.*}}@_Z18return_aligned_refv() -> (!cir.ptr<!rec_Aligned32> {llvm.align = 32 : i64, llvm.dereferenceable = 32 : i64, llvm.nonnull, llvm.noundef}) {{.*}} {
   // BOTH: define {{.*}}noundef nonnull align 32 dereferenceable(32) ptr @_Z18return_aligned_refv()
 
+int fn();
+using Fn = int();
+Fn &fn_ref(Fn &f) { return f; }
+  // CIR: cir.func {{.*}}@_Z6fn_refRFivE(%{{.*}}: !cir.ptr<!cir.func<() -> !s32i>> {llvm.nonnull, llvm.noundef} {{.*}}) -> (!cir.ptr<!cir.func<() -> !s32i>> {llvm.nonnull, llvm.noundef}) {{.*}} {
+  // BOTH: define {{.*}}noundef nonnull ptr @_Z6fn_refRFivE(ptr noundef nonnull %{{.*}})
+
+int call_fn_ref() { return fn_ref(fn)(); }
+  // CIR: cir.call @_Z6fn_refRFivE(%{{.*}}) : (!cir.ptr<!cir.func<() -> !s32i>> {llvm.nonnull, llvm.noundef}) -> (!cir.ptr<!cir.func<() -> !s32i>> {llvm.nonnull, llvm.noundef})
+  // BOTH: call noundef nonnull ptr @_Z6fn_refRFivE(ptr noundef nonnull @_Z2fnv)
+
 void caller(Struct s, int i, Incomplete &inc) {
 
   s.this_func();
