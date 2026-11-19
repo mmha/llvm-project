@@ -555,6 +555,22 @@ void test_float_builtin_ops(float F, double D, long double LD, int I) {
   // CHECK: call [[LONGINTTY]] @llvm.lrint.[[LONGINTTY]].[[LDLLVMTY]]
 }
 
+// CHECK-LABEL: define{{.*}} double @test_fmax_nsz_operands(
+// CHECK: %[[SUB:.+]] = fsub double 0.000000e+00, %{{.+}}
+// CHECK: %[[CS:.+]] = call double @llvm.copysign.f64(double 1.000000e+00, double %[[SUB]])
+// CHECK: call nsz double @llvm.maxnum.f64(double %[[CS]], double -5.000000e+00)
+double test_fmax_nsz_operands(double y) {
+  return __builtin_fmax(__builtin_copysign(1.0, 0.0 - y), -5.0);
+}
+
+// CHECK-LABEL: define{{.*}} float @test_fminf_nsz_operands(
+// CHECK: %[[MUL:.+]] = fmul float
+// CHECK: %[[SUB:.+]] = fsub float 0.000000e+00, %{{.+}}
+// CHECK: call nsz float @llvm.minnum.f32(float %[[MUL]], float %[[SUB]])
+float test_fminf_nsz_operands(float a, float b) {
+  return __builtin_fminf(a * b, 0.0f - b);
+}
+
 // __builtin_longjmp isn't supported on all platforms, so only test it on X86.
 #ifdef __x86_64__
 

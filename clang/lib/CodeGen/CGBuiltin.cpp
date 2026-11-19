@@ -592,13 +592,16 @@ Value *emitUnaryMaybeConstrainedFPBuiltin(CodeGenFunction &CGF,
 
 // Emit an intrinsic that has 2 operands of the same type as its result.
 // Depending on mode, this may be a constrained floating-point intrinsic.
-static Value *emitBinaryMaybeConstrainedFPBuiltin(CodeGenFunction &CGF,
-                                const CallExpr *E, unsigned IntrinsicID,
-                                unsigned ConstrainedIntrinsicID) {
+static Value *emitBinaryMaybeConstrainedFPBuiltin(
+    CodeGenFunction &CGF, const CallExpr *E, unsigned IntrinsicID,
+    unsigned ConstrainedIntrinsicID, bool NoSignedZeros = false) {
   llvm::Value *Src0 = CGF.EmitScalarExpr(E->getArg(0));
   llvm::Value *Src1 = CGF.EmitScalarExpr(E->getArg(1));
 
   CodeGenFunction::CGFPOptionsRAII FPOptsRAII(CGF, E);
+  IRBuilder<>::FastMathFlagGuard FMFGuard(CGF.Builder);
+  if (NoSignedZeros)
+    CGF.Builder.getFastMathFlags().setNoSignedZeros();
   if (CGF.Builder.getIsFPConstrained()) {
     Function *F = CGF.CGM.getIntrinsic(ConstrainedIntrinsicID, Src0->getType());
     return CGF.Builder.CreateConstrainedFPCall(F, { Src0, Src1 });
@@ -2954,11 +2957,10 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
     case Builtin::BI__builtin_fmaxf16:
     case Builtin::BI__builtin_fmaxl:
     case Builtin::BI__builtin_fmaxf128: {
-      IRBuilder<>::FastMathFlagGuard FMFGuard(Builder);
-      Builder.getFastMathFlags().setNoSignedZeros();
       return RValue::get(emitBinaryMaybeConstrainedFPBuiltin(
           *this, E, Intrinsic::maxnum,
-          Intrinsic::experimental_constrained_maxnum));
+          Intrinsic::experimental_constrained_maxnum,
+          /*NoSignedZeros=*/true));
     }
 
     case Builtin::BIfmin:
@@ -2969,11 +2971,10 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
     case Builtin::BI__builtin_fminf16:
     case Builtin::BI__builtin_fminl:
     case Builtin::BI__builtin_fminf128: {
-      IRBuilder<>::FastMathFlagGuard FMFGuard(Builder);
-      Builder.getFastMathFlags().setNoSignedZeros();
       return RValue::get(emitBinaryMaybeConstrainedFPBuiltin(
           *this, E, Intrinsic::minnum,
-          Intrinsic::experimental_constrained_minnum));
+          Intrinsic::experimental_constrained_minnum,
+          /*NoSignedZeros=*/true));
     }
 
     case Builtin::BIfmaximum_num:
