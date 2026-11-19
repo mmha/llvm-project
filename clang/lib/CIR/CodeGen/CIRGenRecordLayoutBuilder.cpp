@@ -864,6 +864,30 @@ convertRecordArgPassingKind(RecordArgPassingKind kind) {
   llvm_unreachable("unknown RecordArgPassingKind");
 }
 
+static bool holdsRecordNotPassableInRegs(const ASTContext &astContext,
+                                         const RecordDecl *rd) {
+  if (rd->getArgPassingRestrictions() != RecordArgPassingKind::CanPassInRegs)
+    return true;
+  auto holds = [&](QualType ty) {
+    while (const clang::ArrayType *at = astContext.getAsArrayType(ty)) {
+      if (const auto *cat = dyn_cast<ConstantArrayType>(at);
+          cat && cat->isZeroSize())
+        return false;
+      ty = at->getElementType();
+    }
+    const RecordDecl *frd = ty->getAsRecordDecl();
+    return frd && holdsRecordNotPassableInRegs(astContext, frd);
+  };
+  if (const auto *cxxRD = dyn_cast<CXXRecordDecl>(rd))
+    for (const CXXBaseSpecifier &base : cxxRD->bases())
+      if (holds(base.getType()))
+        return true;
+  for (const FieldDecl *field : rd->fields())
+    if (holds(field->getType()))
+      return true;
+  return false;
+}
+
 /// Whether the member kinds on \p recordTy answer the record's ABI emptiness
 /// the same way the AST predicate does.
 [[maybe_unused]] static bool
@@ -955,14 +979,14 @@ CIRGenTypes::computeRecordLayout(const RecordDecl *rd, cir::RecordType *ty) {
     bool isTransparentUnion = rd->hasAttr<TransparentUnionAttr>();
     bool hasFlexibleArrayMember = rd->hasFlexibleArrayMember();
 
-    auto addLayout = [&](mlir::StringAttr name, uint64_t align,
-                         uint64_t unadjusted) {
+    auto addLayout = [&](mlir::StringAttr name, cir::ArgPassingKind kind,
+                         uint64_t align, uint64_t unadjusted) {
       cgm.addRecordLayout(name, cir::RecordLayoutAttr::get(
-                                    mlirCtx, apk, hasTrivialDestructor, align,
+                                    mlirCtx, kind, hasTrivialDestructor, align,
                                     unadjusted, isTransparentUnion,
                                     hasFlexibleArrayMember));
     };
-    addLayout(ty->getName(), recordAlignInBytes, unadjustedAlignInBytes);
+    addLayout(ty->getName(), apk, recordAlignInBytes, unadjustedAlignInBytes);
 
     // The base subobject is a separate named type. Record the non-virtual
     // alignment for it, and keep the unadjusted alignment within that
@@ -971,7 +995,11 @@ CIRGenTypes::computeRecordLayout(const RecordDecl *rd, cir::RecordType *ty) {
     if (baseTy && baseTy != *ty) {
       uint64_t baseAlign = astLayout.getNonVirtualAlignment().getQuantity();
       uint64_t baseUnadjusted = std::min(unadjustedAlignInBytes, baseAlign);
-      addLayout(baseTy.getName(), baseAlign, baseUnadjusted);
+      cir::ArgPassingKind baseAPK = apk;
+      if (apk == cir::ArgPassingKind::CanPassInRegs &&
+          holdsRecordNotPassableInRegs(astContext, rd))
+        baseAPK = cir::ArgPassingKind::CannotPassInRegs;
+      addLayout(baseTy.getName(), baseAPK, baseAlign, baseUnadjusted);
     }
   }
 
