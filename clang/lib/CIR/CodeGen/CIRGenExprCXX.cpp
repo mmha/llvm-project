@@ -369,8 +369,11 @@ static void emitNullBaseClassInitialization(CIRGenFunction &cgf,
            "Expected store to begin at offset zero");
     CIRGenBuilderTy &builder = cgf.getBuilder();
     mlir::Location loc = cgf.getLoc(base->getBeginLoc());
-    builder.createStore(loc, builder.getConstant(loc, nullConstantForBase),
-                        destPtr);
+    Address dest = destPtr.withElementType(builder, cgf.cgm.voidTy);
+    mlir::Value zero = builder.getConstInt(loc, cgf.cgm.uInt8Ty, 0);
+    mlir::Value size = builder.getConstInt(loc, cgf.cgm.uInt64Ty,
+                                           stores[0].second.getQuantity());
+    builder.createMemSet(loc, dest, zero, size);
   }
 }
 

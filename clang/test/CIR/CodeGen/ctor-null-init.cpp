@@ -47,12 +47,12 @@ void test_non_empty_base_null_init() {
 // CIR: cir.func {{.*}} @_Z29test_non_empty_base_null_initv()
 // CIR:   %[[TMP:.*]] = cir.alloca "agg.tmp.ensured" {{.*}} : !cir.ptr<!rec_D>
 // CIR:   %[[BASE:.*]] = cir.base_class_addr nonnull %[[TMP]] [0] : !cir.ptr<!rec_D> -> !cir.ptr<!rec_C>
-// CIR:   %[[ZERO:.*]] = cir.const #cir.const_record<{#cir.int<0> : !s32i}> : !rec_C
-// CIR:   cir.store{{.*}} %[[ZERO]], %[[BASE]]
+// CIR:   %[[VOID:.*]] = cir.cast bitcast %[[BASE]] : !cir.ptr<!rec_C> -> !cir.ptr<!void>
+// CIR:   cir.libc.memset %{{.+}} bytes at %[[VOID]] align(4) to %{{.+}}
 
 // LLVM: define{{.*}} void @_Z29test_non_empty_base_null_initv()
 // LLVM:   %[[TMP:.*]] = alloca %struct.D
-// LLVM:   store %struct.C zeroinitializer, ptr %[[TMP]]
+// LLVM:   call void @llvm.memset.p0.i64(ptr {{.*}}%[[TMP]], i8 0, i64 4, i1 false)
 
 // OGCG: define {{.*}} void @_Z29test_non_empty_base_null_initv()
 // OGCG:   %[[TMP:.*]] = alloca %struct.D
@@ -78,17 +78,51 @@ void test_base_chain_null_init() {
 // CIR: cir.func {{.*}} @_Z25test_base_chain_null_initv()
 // CIR:   %[[TMP:.*]] = cir.alloca "agg.tmp.ensured" {{.*}} : !cir.ptr<!rec_G>
 // CIR:   %[[BASE:.*]] = cir.base_class_addr nonnull %[[TMP]] [0] : !cir.ptr<!rec_G> -> !cir.ptr<!rec_F>
-// CIR:   %[[ZERO:.*]] = cir.const #cir.const_record<{#cir.zero : !rec_E}> : !rec_F
-// CIR:   cir.store{{.*}} %[[ZERO]], %[[BASE]]
+// CIR:   %[[VOID:.*]] = cir.cast bitcast %[[BASE]] : !cir.ptr<!rec_F> -> !cir.ptr<!void>
+// CIR:   cir.libc.memset %{{.+}} bytes at %[[VOID]] align(4) to %{{.+}}
 
 // LLVM: define{{.*}} void @_Z25test_base_chain_null_initv()
 // LLVM:   %[[TMP:.*]] = alloca %struct.G
-// LLVM:   store %struct.F zeroinitializer, ptr %[[TMP]]
+// LLVM:   call void @llvm.memset.p0.i64(ptr {{.*}}%[[TMP]], i8 0, i64 4, i1 false)
 
 // OGCG: define {{.*}} void @_Z25test_base_chain_null_initv()
 // OGCG:   %[[TMP:.*]] = alloca %struct.G
 // OGCG:   %[[BASE:.*]] = getelementptr inbounds i8, ptr %[[TMP]], i64 0
 // OGCG:   call void @llvm.memset.p0.i64(ptr{{.*}} %[[BASE]], i8 0, i64 4, i1 false)
+
+struct H {
+  int h;
+  void *p;
+  H() = default;
+  H(int);
+};
+
+struct I : H {
+};
+
+void test_padded_base_null_init() {
+  I{};
+}
+
+// CIR: cir.func {{.*}} @_Z26test_padded_base_null_initv()
+// CIR:   %[[TMP:.*]] = cir.alloca "agg.tmp.ensured" {{.*}} : !cir.ptr<!rec_I>
+// CIR:   %[[BASE:.*]] = cir.base_class_addr nonnull %[[TMP]] [0] : !cir.ptr<!rec_I> -> !cir.ptr<!rec_H>
+// CIR:   %[[VOID:.*]] = cir.cast bitcast %[[BASE]] : !cir.ptr<!rec_H> -> !cir.ptr<!void>
+// CIR:   %[[SIZE:.*]] = cir.const #cir.int<16> : !u64i
+// CIR:   cir.libc.memset %[[SIZE]] bytes at %[[VOID]] align(8) to %{{.+}}
+// CIR-NOT:   cir.store
+// CIR:   cir.return
+
+// LLVM: define{{.*}} void @_Z26test_padded_base_null_initv()
+// LLVM:   %[[TMP:.*]] = alloca %struct.I
+// LLVM:   call void @llvm.memset.p0.i64(ptr {{.*}}%[[TMP]], i8 0, i64 16, i1 false)
+// LLVM-NOT:   store
+// LLVM:   ret void
+
+// OGCG: define {{.*}} void @_Z26test_padded_base_null_initv()
+// OGCG:   %[[TMP:.*]] = alloca %struct.I
+// OGCG:   %[[BASE:.*]] = getelementptr inbounds i8, ptr %[[TMP]], i64 0
+// OGCG:   call void @llvm.memset.p0.i64(ptr{{.*}} %[[BASE]], i8 0, i64 16, i1 false)
 
 struct VBase {
   virtual ~VBase();
@@ -107,14 +141,14 @@ VDerived::VDerived() : VBase() {}
 
 // CIR-LABEL: cir.func {{.*}}@_ZN8VDerivedC2Ev
 // CIR: %[[BASE:.*]] = cir.base_class_addr nonnull {{.*}} [0] : !cir.ptr<!rec_VDerived> -> !cir.ptr<!rec_VBase>
-// CIR: %[[ZERO:.*]] = cir.const #cir.const_record<{#cir.zero : !cir.vptr}> : !rec_VBase 
-// CIR: cir.store align(8) %[[ZERO]], %[[BASE]] : !rec_VBase, !cir.ptr<!rec_VBase>
+// CIR: %[[VOID:.*]] = cir.cast bitcast %[[BASE]] : !cir.ptr<!rec_VBase> -> !cir.ptr<!void>
+// CIR: cir.libc.memset %{{.+}} bytes at %[[VOID]] align(8) to %{{.+}}
 // CIR: cir.call @_ZN5VBaseC2Ev(%[[BASE]])
 // CIR: cir.vtable.address_point(@_ZTV8VDerived
-// CIR:  %5 = cir.vtable.get_vptr
+// CIR:  %{{.+}} = cir.vtable.get_vptr
 
 // LLVM-LABEL: define {{.*}}@_ZN8VDerivedC2Ev
-// LLVM: store %struct.VBase zeroinitializer, ptr %[[ADDR:.*]], align 8
+// LLVM: call void @llvm.memset.p0.i64(ptr {{.*}}%[[ADDR:.*]], i8 0, i64 8, i1 false)
 // LLVM: call void @_ZN5VBaseC2Ev(ptr {{.*}}%[[ADDR]])
 // LLVM: store ptr getelementptr inbounds nuw (i8, ptr @_ZTV8VDerived, i64 16), ptr %[[ADDR]]
 
