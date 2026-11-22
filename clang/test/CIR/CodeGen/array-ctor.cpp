@@ -474,20 +474,22 @@ struct R {
 extern "C" void use_r(R *);
 
 // TEMP-LABEL: cir.func {{.*}} @extended_member_filler(
-// TEMP: %[[TMP:.*]] = cir.alloca "ref.tmp0"
-// TEMP: cir.do {
-// TEMP: cir.call @_ZN7ArgTempC1Ei(%[[TMP]],
-// TEMP: } while {
+// TEMP: %[[TMP0:.*]] = cir.alloca "ref.tmp0"
+// TEMP: %[[TMP1:.*]] = cir.alloca "ref.tmp1"
+// TEMP-NOT: cir.do {
+// TEMP: cir.call @_ZN7ArgTempC1Ei(%[[TMP0]],
+// TEMP: cir.call @_ZN7ArgTempC1Ei(%[[TMP1]],
 // TEMP: cir.call @use_r(
-// TEMP-NOEH: } cleanup normal {
-// TEMP-EH: } cleanup all {
-// TEMP-NEXT: cir.call @_ZN7ArgTempD1Ev(%[[TMP]])
+// TEMP: cir.call @_ZN7ArgTempD1Ev(%[[TMP1]])
+// TEMP: cir.call @_ZN7ArgTempD1Ev(%[[TMP0]])
 
 // TEMP-LLVM-LABEL: define {{.*}} void @extended_member_filler(
-// TEMP-LLVM: call void @_ZN7ArgTempC1Ei(ptr {{.*}} %[[TMP:.*]], i32 {{.*}} 4)
+// TEMP-LLVM: call void @_ZN7ArgTempC1Ei(ptr {{.*}} %[[TMP0:.*]], i32 {{.*}} 4)
+// TEMP-LLVM: call void @_ZN7ArgTempC1Ei(ptr {{.*}} %[[TMP1:.*]], i32 {{.*}} 4)
 // TEMP-LLVM-NOT: call void @_ZN7ArgTempD1Ev
 // TEMP-LLVM: call void @use_r(
-// TEMP-LLVM: call void @_ZN7ArgTempD1Ev(ptr {{.*}} %[[TMP]])
+// TEMP-LLVM: call void @_ZN7ArgTempD1Ev(ptr {{.*}} %[[TMP1]])
+// TEMP-LLVM: call void @_ZN7ArgTempD1Ev(ptr {{.*}} %[[TMP0]])
 
 extern "C" void extended_member_filler() {
   R a[2] = {};

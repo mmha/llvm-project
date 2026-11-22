@@ -737,6 +737,36 @@ void AggExprEmitter::VisitCompoundLiteralExpr(CompoundLiteralExpr *e) {
       cgf.cgm.errorNYI(e->getSourceRange(), "compound literal with destructor");
 }
 
+static bool fillerExtendsAutomaticTemporary(const Expr *e) {
+  SmallVector<const Stmt *, 16> work{e};
+  while (!work.empty()) {
+    const Stmt *s = work.pop_back_val();
+    if (!s)
+      continue;
+    if (const auto *mte = dyn_cast<MaterializeTemporaryExpr>(s))
+      if (mte->getStorageDuration() == SD_Automatic)
+        return true;
+    if (const auto *lambda = dyn_cast<LambdaExpr>(s)) {
+      for (const Expr *init : lambda->capture_inits())
+        work.push_back(init);
+      continue;
+    }
+    if (isa<BlockExpr, StmtExpr>(s))
+      continue;
+    if (const auto *die = dyn_cast<CXXDefaultInitExpr>(s))
+      work.push_back(die->getExpr());
+    if (const auto *dae = dyn_cast<CXXDefaultArgExpr>(s))
+      work.push_back(dae->getExpr());
+    if (const auto *ile = dyn_cast<InitListExpr>(s))
+      work.push_back(ile->getArrayFiller());
+    if (const auto *pli = dyn_cast<CXXParenListInitExpr>(s))
+      work.push_back(pli->getArrayFiller());
+    for (const Stmt *child : s->children())
+      work.push_back(child);
+  }
+  return false;
+}
+
 void AggExprEmitter::emitArrayInit(Address destPtr, cir::ArrayType arrayTy,
                                    QualType arrayQTy, Expr *e,
                                    ArrayRef<Expr *> args, Expr *arrayFiller) {
@@ -828,6 +858,32 @@ void AggExprEmitter::emitArrayInit(Address destPtr, cir::ArrayType arrayTy,
 
       if (endOfInit.isValid())
         builder.createStore(loc, element, endOfInit);
+    }
+
+    if (arrayFiller && !setArrayInitLoopExprScope &&
+        fillerExtendsAutomaticTemporary(arrayFiller)) {
+      const uint64_t numFilled = numArrayElements - numInitElements;
+      if (numFilled > 256) {
+        cgf.cgm.errorNYI(arrayFiller->getSourceRange(),
+                         "array filler with lifetime-extended temporaries for "
+                         "more than 256 elements");
+        return;
+      }
+      for (uint64_t i = 0; i != numFilled; ++i) {
+        if (i) {
+          mlir::Value one = builder.getConstantInt(loc, cgf.ptrDiffTy, 1);
+          element = cir::PtrStrideOp::create(builder, loc, cirElementPtrType,
+                                             element, one);
+          if (endOfInit.isValid())
+            builder.createStore(loc, element, endOfInit);
+        }
+        LValue elementLV = cgf.makeAddrLValue(
+            Address(element, cirElementType, elementAlign), elementType);
+        CIRGenFunction::FullExprCleanupScope scope(cgf, arrayFiller);
+        scope.deferLifetimeExtendedCleanups();
+        emitInitializationToLValue(arrayFiller, elementLV);
+      }
+      return;
     }
 
     // Allocate the temporary variable
