@@ -11921,6 +11921,16 @@ static void diagnoseStringPlusChar(Sema &Self, SourceLocation OpLoc,
   }
 }
 
+static QualType getCompoundAssignPointerLHSType(const Expr *LHS) {
+  QualType LHSTy = LHS->getType();
+  if (const auto *AT = LHSTy->getAs<AtomicType>()) {
+    QualType ValueTy = AT->getValueType();
+    if (ValueTy->isPointerType() && !ValueTy->isFunctionPointerType())
+      return ValueTy;
+  }
+  return LHSTy;
+}
+
 /// Emit error when two pointers are incompatible.
 static void diagnosePointerIncompatibility(Sema &S, SourceLocation Loc,
                                            Expr *LHSExpr, Expr *RHSExpr) {
@@ -11987,17 +11997,20 @@ QualType Sema::CheckAdditionOperands(ExprResult &LHS, ExprResult &RHS,
   // Type-checking.  Ultimately the pointer's going to be in PExp;
   // note that we bias towards the LHS being the pointer.
   Expr *PExp = LHS.get(), *IExp = RHS.get();
+  QualType PExpTy =
+      CompLHSTy ? getCompoundAssignPointerLHSType(PExp) : PExp->getType();
 
   bool isObjCPointer;
-  if (PExp->getType()->isPointerType()) {
+  if (PExpTy->isPointerType()) {
     isObjCPointer = false;
-  } else if (PExp->getType()->isObjCObjectPointerType()) {
+  } else if (PExpTy->isObjCObjectPointerType()) {
     isObjCPointer = true;
   } else {
     std::swap(PExp, IExp);
-    if (PExp->getType()->isPointerType()) {
+    PExpTy = PExp->getType();
+    if (PExpTy->isPointerType()) {
       isObjCPointer = false;
-    } else if (PExp->getType()->isObjCObjectPointerType()) {
+    } else if (PExpTy->isObjCObjectPointerType()) {
       isObjCPointer = true;
     } else {
       QualType ResultTy = InvalidOperands(Loc, LHS, RHS);
@@ -12005,7 +12018,7 @@ QualType Sema::CheckAdditionOperands(ExprResult &LHS, ExprResult &RHS,
       return ResultTy;
     }
   }
-  assert(PExp->getType()->isAnyPointerType());
+  assert(PExpTy->isAnyPointerType());
 
   if (!IExp->getType()->isIntegerType())
     return InvalidOperands(Loc, LHS, RHS);
@@ -12046,14 +12059,14 @@ QualType Sema::CheckAdditionOperands(ExprResult &LHS, ExprResult &RHS,
   if (CompLHSTy) {
     QualType LHSTy = Context.isPromotableBitField(LHS.get());
     if (LHSTy.isNull()) {
-      LHSTy = LHS.get()->getType();
+      LHSTy = PExp == LHS.get() ? PExpTy : LHS.get()->getType();
       if (Context.isPromotableIntegerType(LHSTy))
         LHSTy = Context.getPromotedIntegerType(LHSTy);
     }
     *CompLHSTy = LHSTy;
   }
 
-  return PExp->getType();
+  return PExpTy;
 }
 
 /// Determine whether the size of \p T is provably zero: some array dimension
@@ -12127,11 +12140,14 @@ QualType Sema::CheckSubtractionOperands(ExprResult &LHS, ExprResult &RHS,
   }
 
   // Either ptr - int   or   ptr - ptr.
-  if (LHS.get()->getType()->isAnyPointerType()) {
-    QualType lpointee = LHS.get()->getType()->getPointeeType();
+  QualType LHSTy = LHS.get()->getType();
+  if (CompLHSTy && RHS.get()->getType()->isIntegerType())
+    LHSTy = getCompoundAssignPointerLHSType(LHS.get());
+  if (LHSTy->isAnyPointerType()) {
+    QualType lpointee = LHSTy->getPointeeType();
 
     // Diagnose bad cases where we step over interface counts.
-    if (LHS.get()->getType()->isObjCObjectPointerType() &&
+    if (LHSTy->isObjCObjectPointerType() &&
         checkArithmeticOnObjCPointer(*this, Loc, LHS.get()))
       return QualType();
 
@@ -12168,8 +12184,9 @@ QualType Sema::CheckSubtractionOperands(ExprResult &LHS, ExprResult &RHS,
       CheckArrayAccess(LHS.get(), RHS.get(), /*ArraySubscriptExpr*/nullptr,
                        /*AllowOnePastEnd*/true, /*IndexNegated*/true);
 
-      if (CompLHSTy) *CompLHSTy = LHS.get()->getType();
-      return LHS.get()->getType();
+      if (CompLHSTy)
+        *CompLHSTy = LHSTy;
+      return LHSTy;
     }
 
     // Handle pointer-pointer subtractions.

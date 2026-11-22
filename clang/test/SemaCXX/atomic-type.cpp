@@ -111,3 +111,20 @@ namespace non_trivially_copyable {
   _Atomic S s;  // expected-error {{_Atomic cannot be applied to type 'S' which is not trivially copyable}} \
                 // expected-warning {{'_Atomic' is a C11 extension}}
 }
+
+namespace atomic_pointer_compound_assign {
+  struct T { int a, b, c; };
+  struct Inc; // expected-note 2 {{forward declaration of 'atomic_pointer_compound_assign::Inc'}}
+  void f(_Atomic(T *) &p, long n, _Atomic(Inc *) &i, _Atomic(void *) &v, T *q) { // expected-warning 3 {{'_Atomic' is a C11 extension}}
+    p += n;
+    p -= 2;
+    T *r = (p += 1);
+    _Atomic(T *) &l = (p -= 1); // expected-warning {{'_Atomic' is a C11 extension}}
+    i += 1; // expected-error {{arithmetic on a pointer to an incomplete type 'Inc'}}
+    i -= 1; // expected-error {{arithmetic on a pointer to an incomplete type 'Inc'}}
+    v += 1; // expected-error {{arithmetic on a pointer to void}}
+    p += q; // expected-error {{invalid operands to binary expression ('_Atomic(T *)' and 'T *')}}
+  }
+  template <typename U> U *g(_Atomic(U *) &p, long n) { return p -= n; } // expected-warning {{'_Atomic' is a C11 extension}}
+  template T *g<T>(_Atomic(T *) &, long); // expected-warning {{'_Atomic' is a C11 extension}}
+}

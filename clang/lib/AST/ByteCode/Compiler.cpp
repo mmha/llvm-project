@@ -3445,7 +3445,7 @@ bool Compiler<Emitter>::VisitCompoundAssignOperator(
   if (ResultT == PT_Float || RT == PT_Float)
     return VisitFloatCompoundAssignOperator(E);
 
-  if (E->getType()->isPointerType())
+  if (E->getType().getAtomicUnqualifiedType()->isPointerType())
     return VisitPointerCompoundAssignOperator(E);
 
   assert(!E->getType()->isPointerType() && "Handled above");

@@ -4610,12 +4610,13 @@ llvm::Value *CodeGenFunction::EmitPointerArithmetic(
     EmitBoundsCheck(BO, pointerOperand, index, indexOperand->getType(),
                     /*Accessed*/ false);
 
-  const PointerType *pointerType =
-      pointerOperand->getType()->getAs<PointerType>();
+  QualType pointerOperandType = pointerOperand->getType();
+  if (const auto *atomicTy = pointerOperandType->getAs<AtomicType>())
+    pointerOperandType = atomicTy->getValueType();
+  const PointerType *pointerType = pointerOperandType->getAs<PointerType>();
   if (!pointerType) {
-    QualType objectType = pointerOperand->getType()
-                              ->castAs<ObjCObjectPointerType>()
-                              ->getPointeeType();
+    QualType objectType =
+        pointerOperandType->castAs<ObjCObjectPointerType>()->getPointeeType();
     llvm::Value *objectSize =
         CGM.getSize(getContext().getTypeSizeInChars(objectType));
 

@@ -972,6 +972,8 @@ documentation](CIR/index.md) for more information regarding ClangIR's status and
 - Fixed conversion from `float` to `bool` in `__builtin_convertvector`. (#GH228649)
 - Fixed `-print-dependency-directives-minimized-source` output for object-like macros starting with '(' so that it is not incorrectly turned into a function-like macro.
 - Fixed an exponential time-increase bug when collecting argument dependent lookup candidates when the same type is used several times at each level.
+- Fixed a rejects-valid of `+=` and `-=` with an atomic pointer on the left and an integer on the right,
+  such as `_Atomic(int *) p; p += n;`, as allowed by C11 6.5.16.2p1. (#GH25135)
 
 #### Bug Fixes to Compiler Builtins
 

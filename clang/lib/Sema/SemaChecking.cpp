@@ -16195,8 +16195,10 @@ void Sema::CheckArrayAccess(const Expr *BaseExpr, const Expr *IndexExpr,
   if (IndexExpr->isValueDependent())
     return;
 
-  const Type *EffectiveType =
-      BaseExpr->getType()->getPointeeOrArrayElementType();
+  QualType BaseTy = BaseExpr->getType();
+  if (const auto *AT = BaseTy->getAs<AtomicType>())
+    BaseTy = AT->getValueType();
+  const Type *EffectiveType = BaseTy->getPointeeOrArrayElementType();
   BaseExpr = BaseExpr->IgnoreParenCasts();
   const ConstantArrayType *ArrayTy =
       Context.getAsConstantArrayType(BaseExpr->getType());

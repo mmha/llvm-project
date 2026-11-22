@@ -67,3 +67,20 @@ namespace UnionTrivialCopy {
   }
   static_assert(testA() == 5, "");
 }
+
+namespace AtomicPointerCompoundAssign {
+  constexpr int arr[4] = {1, 2, 3, 4};
+  constexpr int f() { // ref-error {{constexpr function never produces a constant expression}}
+    _Atomic(const int *) p = arr;
+    p += 3; // ref-note 2 {{subexpression not valid in a constant expression}}
+    return *(p -= 1);
+  }
+  static_assert(f() == 3, ""); // ref-error {{not an integral constant expression}} \
+                               // ref-note {{in call to 'f()'}}
+  constexpr int g() { // both-error {{constexpr function never produces a constant expression}}
+    _Atomic(const int *) p = arr;
+    p += 5; // expected-note {{cannot refer to element 5 of array of 4 elements in a constant expression}} \
+            // ref-note {{subexpression not valid in a constant expression}}
+    return 0;
+  }
+}

@@ -54,6 +54,16 @@ void f4(struct S *p) { // expected-note {{declared here}} addr16-note {{declared
   // addr16-warning@-1 {{the pointer incremented by 7'073'650 refers past the last possible element for an array in 16-bit address space containing 152-bit (19-byte) elements (max possible 3'449 elements)}}
 }
 
+void f4_atomic(_Atomic(struct S *) p) { // expected-note {{declared here}} addr16-note {{declared here}}
+  p += 3;
+  p += 7073650413200313099;
+  // addr16-warning@-1 {{the pointer incremented by 7'073'650'413'200'313'099 refers past the last possible element for an array in 16-bit address space containing 152-bit (19-byte) elements (max possible 3'449 elements)}}
+  // addr32-warning@-2 {{the pointer incremented by 7'073'650'413'200'313'099 refers past the last possible element for an array in 32-bit address space containing 192-bit (24-byte) elements (max possible 178'956'970 elements)}}
+  // addr64-warning@-3 {{the pointer incremented by 7'073'650'413'200'313'099 refers past the last possible element for an array in 64-bit address space containing 256-bit (32-byte) elements (max possible 576'460'752'303'423'488 elements)}}
+  p += 7073650;
+  // addr16-warning@-1 {{the pointer incremented by 7'073'650 refers past the last possible element for an array in 16-bit address space containing 152-bit (19-byte) elements (max possible 3'449 elements)}}
+}
+
 struct BQ {
   struct S bigblock[3276];
 };

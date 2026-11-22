@@ -113,4 +113,53 @@ _Atomic(int) compound_mul(_Atomic(int) in) {
   return (in *= 5);
 }
 
+int *compound_ptr_add(_Atomic(int *) *p, long n) {
+// CHECK-LABEL: @compound_ptr_add
+// NATIVE:      [[OLD:%.*]] = load atomic ptr, ptr [[P:%.*]] seq_cst, align 8
+// LIBCALL:     call void @__atomic_load(i32 noundef 4, ptr noundef [[P:%.*]], ptr noundef [[TMP:%.*]], i32 noundef 5)
+// LIBCALL:     [[OLD:%.*]] = load ptr, ptr [[TMP]]
+// CHECK:       atomic_op:
+// CHECK-NEXT:  [[CUR:%.*]] = phi ptr [ [[OLD]], %entry ], [ {{%.*}}, %atomic_op ]
+// CHECK-NEXT:  [[NEW:%.*]] = getelementptr inbounds i32, ptr [[CUR]], i{{32|64}} {{%.*}}
+// NATIVE-NEXT: cmpxchg ptr [[P]], ptr [[CUR]], ptr [[NEW]] seq_cst seq_cst, align 8
+// LIBCALL:     call zeroext i1 @__atomic_compare_exchange(i32 noundef 4, ptr noundef [[P]],
+// CHECK:       atomic_cont:
+// CHECK-NEXT:  ret ptr [[NEW]]
+
+  return (*p += n);
+}
+
+struct S12 { int a, b, c; };
+_Static_assert(sizeof(struct S12) == 12, "");
+
+struct S12 *compound_ptr_sub(_Atomic(struct S12 *) *p, int n) {
+// CHECK-LABEL: @compound_ptr_sub
+// NATIVE:      [[OLD:%.*]] = load atomic ptr, ptr [[P:%.*]] seq_cst, align 8
+// LIBCALL:     call void @__atomic_load(i32 noundef 4, ptr noundef [[P:%.*]], ptr noundef [[TMP:%.*]], i32 noundef 5)
+// LIBCALL:     [[OLD:%.*]] = load ptr, ptr [[TMP]]
+// CHECK:       atomic_op:
+// CHECK-NEXT:  [[CUR:%.*]] = phi ptr [ [[OLD]], %entry ], [ {{%.*}}, %atomic_op ]
+// NATIVE-NEXT: [[EXT:%.*]] = sext i32 {{%.*}} to i64
+// NATIVE-NEXT: [[NEG:%.*]] = sub i64 0, [[EXT]]
+// LIBCALL-NEXT: [[NEG:%.*]] = sub i32 0, {{%.*}}
+// CHECK-NEXT:  [[NEW:%.*]] = getelementptr inbounds %struct.S12, ptr [[CUR]], i{{32|64}} [[NEG]]
+// NATIVE-NEXT: cmpxchg ptr [[P]], ptr [[CUR]], ptr [[NEW]] seq_cst seq_cst, align 8
+// LIBCALL:     call zeroext i1 @__atomic_compare_exchange(i32 noundef 4, ptr noundef [[P]],
+// CHECK:       atomic_cont:
+// CHECK-NEXT:  ret ptr [[NEW]]
+
+  return (*p -= n);
+}
+
+void compound_ptr_volatile(volatile _Atomic(struct S12 *) *p) {
+// NATIVE-LABEL: @compound_ptr_volatile
+// NATIVE:       [[OLD:%.*]] = load atomic volatile ptr, ptr [[P:%.*]] seq_cst, align 8
+// NATIVE:       atomic_op:
+// NATIVE-NEXT:  [[CUR:%.*]] = phi ptr [ [[OLD]], %entry ], [ {{%.*}}, %atomic_op ]
+// NATIVE-NEXT:  [[NEW:%.*]] = getelementptr inbounds %struct.S12, ptr [[CUR]], i64 2
+// NATIVE-NEXT:  cmpxchg volatile ptr [[P]], ptr [[CUR]], ptr [[NEW]] seq_cst seq_cst, align 8
+
+  *p += 2;
+}
+
 // LIBCALL: [[LC_ATTRS]] = { nounwind willreturn }
